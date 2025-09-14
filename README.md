@@ -35,7 +35,16 @@ More detailed build notes will be added as systems migrate from the original Vel
 ## Contributing
 
 Contributions of code, art, design, and testing are welcome.
+
 Please review [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) for workflow guidelines.
+
+## Development
+
+- Toolchain: `nightly-2025-09-14` (see `rust-toolchain.toml`).
+- Components: `rustfmt`, `clippy`.
+- Branches: `feat/<scope>` for features, `fix/<scope>` for bug fixes, `chore/<scope>` for maintenance.
+- PRs: include summary, rationale, and tests. CI must pass `fmt`, `clippy`, and `test`.
+- Commits: follow Conventional Commits.
 
 ## Community
 
