@@ -13,7 +13,7 @@ The project is transitioning toward a new identity and feature set; this README 
 
 ## Building
 
-This repository requires **Rust nightly-2024-05-09** (or a compatible nightly) and tracks large binary assets with [Git LFS](https://git-lfs.com/).
+This repository requires **Rust nightly-2025-09-14** (or a compatible nightly) and tracks large binary assets with [Git LFS](https://git-lfs.com/).
 Ensure typical system dependencies for Rust development (e.g., a C compiler and `pkg-config`) are installed.
 
 ```bash
