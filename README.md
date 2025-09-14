@@ -13,6 +13,18 @@ The project is transitioning toward a new identity and feature set; this README 
 
 ## Building
 
+> **Rust edition 2024 (experimental):** This project enables `edition2024` in `Cargo.toml`. Build with nightly Rust and pin a toolchain in `rust-toolchain.toml` to avoid breakage. Example:
+
+```toml
+# rust-toolchain.toml
+[toolchain]
+channel = "nightly"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
+```
+
+All crates in the workspace must be compatible with edition 2024. If you hit dependency issues, try updating crates or filing an issue with details.
+
 This repository requires **Rust nightly-2025-09-14** (or a compatible nightly) and tracks large binary assets with [Git LFS](https://git-lfs.com/).
 Ensure typical system dependencies for Rust development (e.g., a C compiler and `pkg-config`) are installed.
 
