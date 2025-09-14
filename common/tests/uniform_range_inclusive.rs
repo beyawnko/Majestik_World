@@ -1,5 +1,5 @@
 // common/tests/uniform_range_inclusive.rs
-use rand::distributions::Uniform;
+use rand::distr::Uniform;
 use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
