@@ -1352,7 +1352,10 @@ pub fn point_on_prolate_spheroid(
 ) -> Vec3<f32> {
     let mut rng = rng();
     // Uniform distribution on [0.0, 1.0], inclusive.
-    let range = Uniform::new_inclusive(0.0, 1.0).unwrap();
+    let range = match Uniform::new_inclusive(0.0, 1.0) {
+        Ok(r) => r,
+        Err(_) => unreachable!("0..=1 is a valid uniform range"),
+    };
 
     // Midpoint is used as the local origin
     let midpoint = 0.5 * (focus1 + focus2);
