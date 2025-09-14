@@ -1,12 +1,43 @@
 // common/tests/uniform_range_inclusive.rs
+use rand::distributions::Uniform;
+use rand::Rng;
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
+
 #[test]
 fn uniform_range_samples_are_inclusive_0_1() {
-    use rand::{Rng, distributions::Uniform, thread_rng};
+    let mut rng = ChaCha8Rng::from_seed([0u8; 32]);
+    let dist = Uniform::new_inclusive(0.0f64, 1.0f64);
+    for _ in 0..10_000 {
+        let v: f64 = rng.sample(&dist);
+        assert!(v >= 0.0 && v <= 1.0, "v={} out of [0,1]", v);
+    }
+}
 
-    let mut rng = thread_rng();
-    let dist = Uniform::new_inclusive(0.0_f64, 1.0_f64);
-    for _ in 0..1000 {
-        let x: f64 = rng.sample(dist);
-        assert!(x >= 0.0 && x <= 1.0, "sample {} out of [0,1]", x);
+#[test]
+fn uniform_inclusive_integer_range_bounds() {
+    let mut rng = ChaCha8Rng::from_seed([1u8; 32]);
+    let dist = Uniform::new_inclusive(0u32, 10u32);
+    let mut min_seen = u32::MAX;
+    let mut max_seen = u32::MIN;
+    for _ in 0..10_000 {
+        let v = rng.sample(&dist);
+        assert!(v <= 10 && v >= 0);
+        if v < min_seen { min_seen = v; }
+        if v > max_seen { max_seen = v; }
+    }
+    assert!(min_seen >= 0);
+    assert!(max_seen <= 10);
+}
+
+#[test]
+fn uniform_very_small_float_range_bounds() {
+    let mut rng = ChaCha8Rng::from_seed([2u8; 32]);
+    let a = 0.1234_f64;
+    let b = a + 1e-12;
+    let dist = Uniform::new_inclusive(a, b);
+    for _ in 0..1_000 {
+        let v: f64 = rng.sample(&dist);
+        assert!(v >= a && v <= b, "v={} not in [{}, {}]", v, a, b);
     }
 }
