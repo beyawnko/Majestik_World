@@ -1,5 +1,8 @@
 # Majesik: World
 
+[![CI](https://github.com/beyawnko/Majestik_World/actions/workflows/ci.yml/badge.svg)](https://github.com/beyawnko/Majestik_World/actions/workflows/ci.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+
 Majesik: World is an evolving rebrand of the open-source multiplayer voxel RPG derived from Veloren.
 The project is transitioning toward a new identity and feature set; this README holds placeholders while the game takes shape.
 
@@ -10,12 +13,21 @@ The project is transitioning toward a new identity and feature set; this README 
 
 ## Building
 
-This repository uses Rust nightly and tracks large binary assets with [Git LFS](https://git-lfs.com/).
-Before building, ensure Git LFS is installed:
+This repository requires **Rust nightly-2024-05-09** (or a compatible nightly) and tracks large binary assets with [Git LFS](https://git-lfs.com/).
+Ensure typical system dependencies for Rust development (e.g., a C compiler and `pkg-config`) are installed.
 
 ```bash
-git lfs install
+# Install Git LFS hooks for this repository
+git lfs install --local
+
+# Build the project
 cargo build
+
+# Check formatting
+cargo fmt --all -- --check
+
+# Run tests
+cargo test --workspace --all-features
 ```
 
 More detailed build notes will be added as systems migrate from the original Veloren codebase.

@@ -12,13 +12,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+          lfs: true
       - uses: actions/setup-rust@v1
         with:
-          rust-version: stable
+          rust-version: nightly-2024-05-09
       - name: Install Git LFS
         run: git lfs install --local
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v3
         with:
           path: |
             ~/.cargo/registry
