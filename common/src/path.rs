@@ -13,8 +13,8 @@ use kiddo::{SquaredEuclidean, float::kdtree::KdTree, nearest_neighbour::NearestN
 use rand::{Rng, rng};
 #[cfg(feature = "rrt_pathfinding")]
 use rand::{
-    distributions::{Distribution, Uniform},
-    prelude::IteratorRandom,
+    distr::{Distribution, Uniform},
+    seq::IteratorRandom,
 };
 #[cfg(feature = "rrt_pathfinding")]
 use std::f32::consts::PI;
@@ -1060,6 +1060,7 @@ where
 }
 // Enable when airbraking/sensible flight is a thing
 #[cfg(feature = "rrt_pathfinding")]
+#[allow(dead_code)]
 fn find_air_path<V>(
     vol: &V,
     startf: Vec3<f32>,
@@ -1110,6 +1111,7 @@ where
 /// with narrow gaps, such as navigating a maze.
 /// Returns a path and whether that path is complete or not.
 #[cfg(feature = "rrt_pathfinding")]
+#[allow(dead_code)]
 fn informed_rrt_connect<V>(
     vol: &V,
     startf: Vec3<f32>,
@@ -1350,7 +1352,8 @@ pub fn point_on_prolate_spheroid(
 ) -> Vec3<f32> {
     let mut rng = rng();
     // Uniform distribution
-    let range = Uniform::from(0.0..1.0);
+    // `0.0 < 1.0` so constructing the distribution cannot fail.
+    let range = Uniform::new(0.0, 1.0).expect("valid range");
 
     // Midpoint is used as the local origin
     let midpoint = 0.5 * (focus1 + focus2);
@@ -1435,7 +1438,7 @@ pub fn point_on_prolate_spheroid(
     // Vector from focus1 to focus2
     let r_vec = focus2 - focus1;
     // Perpendicular vector in xy plane
-    let perp_vec = Vec3::new(-1.0 * r_vec.y, r_vec.x, 0.0).normalized();
+    let perp_vec = Vec3::new(-r_vec.y, r_vec.x, 0.0).normalized();
     let l = perp_vec.x;
     let m = perp_vec.y;
     let n = perp_vec.z;
