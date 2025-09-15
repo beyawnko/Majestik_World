@@ -7,7 +7,7 @@ use crate::{
     util::{DHashMap, DHashSet},
 };
 use common::{
-    assets::{self, Asset, AssetCache, BoxedError, FileAsset, SharedString},
+    assets::{self, AssetExt, BoxedError, FileAsset},
     terrain::{
         map::{MapConfig, MapSample, MapSizeLg},
         uniform_idx_as_vec2,
@@ -20,7 +20,7 @@ use tiny_skia::{
     Transform,
 };
 
-use std::{env, error::Error, path::PathBuf};
+use std::{borrow::Cow, env, error::Error, path::PathBuf};
 use tracing::error;
 use vek::*;
 
@@ -28,7 +28,8 @@ use vek::*;
 // - Integrate prevailing-wind model into cost function (favor tailwinds,
 //   penalize headwinds)
 // - Support no-fly zones and altitude bands in pathfinding constraints
-// - Index no-fly polygons with an R-tree (e.g., rstar) to accelerate spatial queries and reduce per-step pathfinding cost
+// - Index no-fly polygons with an R-tree (e.g., rstar) to accelerate spatial
+//   queries and reduce per-step pathfinding cost
 // - Cache computed routes per (origin, destination, conditions) and invalidate
 //   on world updates
 // - Persist minimal route summaries to save files; rebuild detailed paths on
@@ -36,15 +37,17 @@ use vek::*;
 // Keep these notes in sync with the linked issue for status and design
 // decisions.
 
-/// Wrapper for Pixmap so that the Asset trait can be implemented.
+/// Wrapper for Pixmap so that the FileAsset blanket `Asset` impl can be used.
 /// This is necessary because Pixmap is in the tiny-skia crate.
 pub struct PackedSpritesPixmap(pub Pixmap);
 
-// This allows Pixmaps to be loaded as assets from the file system or cache.
-impl Asset for PackedSpritesPixmap {
-    fn load(cache: &AssetCache, path: &SharedString) -> Result<Self, BoxedError> {
-        let file: FileAsset = cache.load_owned(path)?;
-        Pixmap::decode_png(file.as_ref())
+// Load PackedSpritesPixmap directly from PNG bytes via the FileAsset blanket
+// Asset impl.
+impl FileAsset for PackedSpritesPixmap {
+    const EXTENSIONS: &'static [&'static str] = &["png"];
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Result<Self, BoxedError> {
+        Pixmap::decode_png(bytes.as_ref())
             .map(PackedSpritesPixmap)
             .map_err(|e| Box::new(e) as BoxedError)
     }
@@ -198,10 +201,10 @@ struct TinySkiaSpriteMapMeta {
 }
 
 /// Allows a TinySkiaSpriteMapMeta to be loaded using the asset system.
-impl Asset for TinySkiaSpriteMapMeta {
-    type Loader = assets::RonLoader;
-
+impl FileAsset for TinySkiaSpriteMapMeta {
     const EXTENSION: &'static str = "ron";
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Result<Self, BoxedError> { assets::load_ron(&bytes) }
 }
 
 /// A set of sprites that are unpacked from a larger sprite map image.
