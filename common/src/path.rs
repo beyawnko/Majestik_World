@@ -1351,9 +1351,10 @@ pub fn point_on_prolate_spheroid(
     search_parameter: f32,
 ) -> Vec3<f32> {
     let mut rng = rng();
-    // Prefer inclusive with graceful fallback.
-    let range = Uniform::new_inclusive(0.0, 1.0)
-        .unwrap_or_else(|_| Uniform::new(0.0, 1.0).expect("fallback range"));
+    // Use inclusive bounds so 0.0 and 1.0 can be sampled; construction is
+    // infallible for 0.0 < 1.0. Inclusive sampling avoids bias at the bounds
+    // for downstream calculations.
+    let range = Uniform::new_inclusive(0.0, 1.0).expect("valid inclusive range");
 
     // Midpoint is used as the local origin
     let midpoint = 0.5 * (focus1 + focus2);

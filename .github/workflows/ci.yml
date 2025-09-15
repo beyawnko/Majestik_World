@@ -12,10 +12,15 @@ jobs:
     timeout-minutes: 30 # abort if build exceeds 30 minutes
     steps:
       - uses: actions/checkout@v4
+        timeout-minutes: 5
         with:
           submodules: true
           lfs: true
+      - name: Install system dependencies (ALSA, udev)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
+        timeout-minutes: 5
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        timeout-minutes: 10
         with:
           toolchain: nightly-2025-09-14
           override: true
@@ -30,7 +35,7 @@ jobs:
             diff .lfs-assets-id .lfs-assets-id-pulled
           fi
       - name: Cache cargo
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
@@ -41,27 +46,31 @@ jobs:
             ${{ runner.os }}-cargo-
       - name: Install rust components
         run: rustup component add rustfmt clippy
+        timeout-minutes: 5
       - name: Format
         run: cargo fmt --all -- --check
-      - name: Lint
+        timeout-minutes: 5
+      - name: Clippy
         run: |
           cargo clippy \
             --workspace \
             --all-targets \
-            --exclude veloren-world \
             -- -D warnings
+        timeout-minutes: 15
 
       - name: Cache advisory DB
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/advisory-dbs
           key: ${{ runner.os }}-advisorydb-${{ hashFiles('deny.toml') }}
+        timeout-minutes: 2
 
-      - name: Cargo Deny
-        uses: EmbarkStudios/cargo-deny-action@v1
-        with:
-          command: check
-          arguments: "--all-features advisories bans licenses sources"
+      - name: Cargo Deny (fetch with retry, then check)
+        run: |
+          for i in 1 2 3; do cargo deny fetch && break || sleep 5; done
+          cargo deny check
+        timeout-minutes: 5
 
       - name: Test
-        run: cargo test --workspace --exclude veloren-world --locked
+        run: cargo test --workspace --locked
+        timeout-minutes: 20
