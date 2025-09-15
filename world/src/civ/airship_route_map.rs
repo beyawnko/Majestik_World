@@ -7,7 +7,7 @@ use crate::{
     util::{DHashMap, DHashSet},
 };
 use common::{
-    assets::{self, Asset, AssetExt, BoxedError, Loader},
+    assets::{self, Asset, AssetCache, BoxedError, FileAsset, SharedString},
     terrain::{
         map::{MapConfig, MapSample, MapSizeLg},
         uniform_idx_as_vec2,
@@ -20,7 +20,7 @@ use tiny_skia::{
     Transform,
 };
 
-use std::{borrow::Cow, env, error::Error, io::ErrorKind, path::PathBuf};
+use std::{env, error::Error, path::PathBuf};
 use tracing::error;
 use vek::*;
 
@@ -28,6 +28,7 @@ use vek::*;
 // - Integrate prevailing-wind model into cost function (favor tailwinds,
 //   penalize headwinds)
 // - Support no-fly zones and altitude bands in pathfinding constraints
+// - Index no-fly polygons with an R-tree (e.g., rstar) to accelerate spatial queries and reduce per-step pathfinding cost
 // - Cache computed routes per (origin, destination, conditions) and invalidate
 //   on world updates
 // - Persist minimal route summaries to save files; rebuild detailed paths on
@@ -39,29 +40,14 @@ use vek::*;
 /// This is necessary because Pixmap is in the tiny-skia crate.
 pub struct PackedSpritesPixmap(pub Pixmap);
 
-// Custom Asset loader that loads a tiny_skia::Pixmap from a PNG file.
-pub struct PackedSpritesPixmapLoader;
-
-impl Loader<PackedSpritesPixmap> for PackedSpritesPixmapLoader {
-    fn load(content: Cow<[u8]>, ext: &str) -> Result<PackedSpritesPixmap, BoxedError> {
-        if ext != "png" {
-            return Err(Box::new(std::io::Error::new(
-                ErrorKind::Unsupported,
-                format!("Unsupported image format: {}", ext),
-            )));
-        }
-        match Pixmap::decode_png(&content) {
-            Ok(pixmap) => Ok(PackedSpritesPixmap(pixmap)),
-            Err(e) => Err(Box::new(e)),
-        }
-    }
-}
-
 // This allows Pixmaps to be loaded as assets from the file system or cache.
 impl Asset for PackedSpritesPixmap {
-    type Loader = PackedSpritesPixmapLoader;
-
-    const EXTENSION: &'static str = "png";
+    fn load(cache: &AssetCache, path: &SharedString) -> Result<Self, BoxedError> {
+        let file: FileAsset = cache.load_owned(path)?;
+        Pixmap::decode_png(file.as_ref())
+            .map(PackedSpritesPixmap)
+            .map_err(|e| Box::new(e) as BoxedError)
+    }
 }
 
 /// Extension trait for tiny_skia::Pixmap.

@@ -52,7 +52,7 @@ fn chi_square_uniform_multiple_seeds() {
     let seeds: &[u64] = &[1337, 2025, 987654321];
     let bins = 10usize;
     let draws = 10_000usize;
-    let dist = Uniform::new_inclusive(0.0_f64, 1.0_f64);
+    let dist = Uniform::new_inclusive(0.0_f64, 1.0_f64).expect("valid range");
     let critical_95_df9 = 16.92_f64; // conservative threshold for df = bins-1
 
     for &seed in seeds {
@@ -87,7 +87,7 @@ fn chi_square_uniform_multiple_seeds() {
 fn uniform_range_chi_square_is_reasonable() {
     // Deterministic stream to keep test stable in CI.
     let mut rng = ChaCha20Rng::from_seed([1u8; 32]);
-    let dist = Uniform::new_inclusive(0.0f64, 1.0);
+    let dist = Uniform::new_inclusive(0.0f64, 1.0).expect("valid range");
 
     const BINS: usize = 10;
     const N: usize = 50_000;
@@ -114,7 +114,7 @@ fn uniform_range_chi_square_is_reasonable() {
 
     // 9 degrees of freedom; 95th percentile ≈ 16.92. Use a generous bound to avoid
     // flakes.
-    let threshold = 24.0;
+    let threshold = 20.0;
     assert!(
         chi_sq < threshold,
         "chi^2={} exceeds threshold {} with counts={:?}",

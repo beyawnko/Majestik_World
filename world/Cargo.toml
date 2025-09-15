@@ -26,6 +26,10 @@ airship_maps = ["dep:tiny-skia"]
 
 default = ["simd"]
 
+[package.metadata.cargo-all-features]
+# Skip mutually exclusive features when building with --all-features
+skip = ["be-dyn-lib", "use-dyn-lib"]
+
 [dependencies]
 common = { package = "veloren-common", path = "../common" }
 common_base = { package = "veloren-common-base", path = "../common/base" }
