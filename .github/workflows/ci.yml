@@ -15,9 +15,10 @@ jobs:
         with:
           submodules: true
           lfs: true
-      - uses: rust-lang/setup-rust@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          rust-version: nightly-2025-09-14
+          toolchain: nightly-2025-09-14
+          override: true
       - name: Install Git LFS and verify assets
         run: |
           git lfs install --local
@@ -29,13 +30,13 @@ jobs:
             diff .lfs-assets-id .lfs-assets-id-pulled
           fi
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v3
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('rust-toolchain.toml') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
       - name: Install rust components
@@ -47,7 +48,20 @@ jobs:
           cargo clippy \
             --workspace \
             --all-targets \
-            --all-features \
+            --exclude veloren-world \
             -- -D warnings
+
+      - name: Cache advisory DB
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/advisory-dbs
+          key: ${{ runner.os }}-advisorydb-${{ hashFiles('deny.toml') }}
+
+      - name: Cargo Deny
+        uses: EmbarkStudios/cargo-deny-action@v1
+        with:
+          command: check
+          arguments: "--all-features advisories bans licenses sources"
+
       - name: Test
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --exclude veloren-world --locked

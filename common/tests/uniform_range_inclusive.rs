@@ -19,7 +19,6 @@ fn uniform_inclusive_integer_range_bounds() {
     let mut min_seen = u32::MAX;
     let mut max_seen = u32::MIN;
     const ITERATIONS: usize = 10_000; // good coverage with reasonable runtime
-    const EPS: f64 = 0.02; // expected distance of extrema ≈ 10/(n+1) ~ 0.001
     for _ in 0..ITERATIONS {
         let v = rng.sample(&dist);
         assert!(v <= 10 && v >= 0);
@@ -30,18 +29,9 @@ fn uniform_inclusive_integer_range_bounds() {
             max_seen = v;
         }
     }
-    assert!((min_seen as f64) >= 0.0);
-    assert!((max_seen as f64) <= 10.0);
-    assert!(
-        (min_seen as f64) <= EPS,
-        "min {:.6} not near 0",
-        min_seen as f64
-    );
-    assert!(
-        (max_seen as f64) >= 10.0 - EPS,
-        "max {:.6} not near 10",
-        max_seen as f64
-    );
+    // For integer ranges with 10_000 draws, expect both bounds to be seen.
+    assert_eq!(min_seen, 0, "minimum bound 0 was not seen");
+    assert_eq!(max_seen, 10, "maximum bound 10 was not seen");
 }
 
 #[test]

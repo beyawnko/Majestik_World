@@ -1353,7 +1353,7 @@ pub fn point_on_prolate_spheroid(
     let mut rng = rng();
     // Prefer inclusive with graceful fallback.
     let range = Uniform::new_inclusive(0.0, 1.0)
-        .unwrap_or_else(|_| Uniform::new(0.0, 0.999_999_999).expect("fallback range"));
+        .unwrap_or_else(|_| Uniform::new(0.0, 1.0).expect("fallback range"));
 
     // Midpoint is used as the local origin
     let midpoint = 0.5 * (focus1 + focus2);

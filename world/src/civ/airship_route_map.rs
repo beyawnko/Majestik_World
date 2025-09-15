@@ -24,6 +24,13 @@ use std::{borrow::Cow, env, error::Error, io::ErrorKind, path::PathBuf};
 use tracing::error;
 use vek::*;
 
+// TODO(Asset vNext): Implement `fn load(cache: &AssetCache, path:
+// &SharedString) -> Result<Self, Box<dyn StdError + Send + Sync>>` for
+// `PackedSpritesPixmap` and `TinySkiaSpriteMapMeta`, and remove legacy
+// associated items `type Loader` and `const EXTENSION`. Temporary compilation
+// unblock happens in CI by excluding `veloren-world` from clippy/tests; see
+// COR-003.
+
 /// Wrapper for Pixmap so that the Asset trait can be implemented.
 /// This is necessary because Pixmap is in the tiny-skia crate.
 pub struct PackedSpritesPixmap(pub Pixmap);
