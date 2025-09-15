@@ -9,7 +9,7 @@ name: CI
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 30 # abort if build exceeds 30 minutes
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,8 +43,11 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Lint
-        run: >
-          cargo clippy --workspace --all-targets --all-features --
-          -D warnings
+        run: |
+          cargo clippy \
+            --workspace \
+            --all-targets \
+            --all-features \
+            -- -D warnings
       - name: Test
         run: cargo test --workspace --all-features

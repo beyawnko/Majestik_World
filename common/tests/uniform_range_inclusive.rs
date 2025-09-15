@@ -1,7 +1,5 @@
 // common/tests/uniform_range_inclusive.rs
-use rand::distr::Uniform;
-use rand::Rng;
-use rand::SeedableRng;
+use rand::{Rng, SeedableRng, distr::Uniform};
 use rand_chacha::ChaCha8Rng;
 
 #[test]
@@ -20,14 +18,30 @@ fn uniform_inclusive_integer_range_bounds() {
     let dist = Uniform::new_inclusive(0u32, 10u32);
     let mut min_seen = u32::MAX;
     let mut max_seen = u32::MIN;
-    for _ in 0..10_000 {
+    const ITERATIONS: usize = 10_000; // good coverage with reasonable runtime
+    const EPS: f64 = 0.02; // expected distance of extrema ≈ 10/(n+1) ~ 0.001
+    for _ in 0..ITERATIONS {
         let v = rng.sample(&dist);
         assert!(v <= 10 && v >= 0);
-        if v < min_seen { min_seen = v; }
-        if v > max_seen { max_seen = v; }
+        if v < min_seen {
+            min_seen = v;
+        }
+        if v > max_seen {
+            max_seen = v;
+        }
     }
-    assert!(min_seen >= 0);
-    assert!(max_seen <= 10);
+    assert!((min_seen as f64) >= 0.0);
+    assert!((max_seen as f64) <= 10.0);
+    assert!(
+        (min_seen as f64) <= EPS,
+        "min {:.6} not near 0",
+        min_seen as f64
+    );
+    assert!(
+        (max_seen as f64) >= 10.0 - EPS,
+        "max {:.6} not near 10",
+        max_seen as f64
+    );
 }
 
 #[test]

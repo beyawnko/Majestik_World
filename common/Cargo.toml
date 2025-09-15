@@ -95,7 +95,7 @@ specs = { workspace = true, features = [
 [dev-dependencies]
 #bench
 criterion = { workspace = true }
-rand_chacha = { version = "0.9", default-features = false }
+rand_chacha = { version = "^0.9", default-features = false }
 
 #test
 tracing-subscriber = { version = "0.3.7", default-features = false, features = [

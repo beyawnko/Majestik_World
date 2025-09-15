@@ -20,7 +20,7 @@ assets/world/map/*.bin filter=lfs diff=lfs merge=lfs -text
 
 # 3D models (enable only if used)
 #*.gltf filter=lfs diff=lfs merge=lfs -text
-#*.glb filter=lfs diff-lfs merge-lfs -text
+*.glb filter=lfs diff=lfs merge=lfs -text
 
 *.ron gitlab-language=rust
 * !text !filter !merge !diff
