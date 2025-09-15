@@ -2,6 +2,7 @@
 # Policy: only track binary images that are typically >100KB. Git LFS does not support size-based rules in .gitattributes,
 # so keep small assets in Git unless they frequently exceed this threshold.
 # Tip: verify which files are tracked by LFS with `git lfs ls-files` when adding or modifying large binaries.
+# Tip: run 'git lfs prune' periodically to clean up local LFS cache from unreferenced objects.
 *.png filter=lfs diff=lfs merge=lfs -text
 *.jpg filter=lfs diff=lfs merge=lfs -text
 *.jpeg filter=lfs diff=lfs merge=lfs -text

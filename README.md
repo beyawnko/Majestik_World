@@ -31,8 +31,7 @@ profile = "minimal"
 All crates in the workspace must be compatible with edition 2024.
 If you hit dependency issues, try updating crates or file an issue with details.
 
-This repository requires **Rust nightly-2025-09-14** (or a compatible nightly)
-and tracks large binary assets with [Git LFS](https://git-lfs.com/).
+This repository also tracks large binary assets with [Git LFS](https://git-lfs.com/).
 Ensure typical system dependencies for Rust development (e.g., a C compiler
 and `pkg-config`) are installed.
 

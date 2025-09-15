@@ -1351,9 +1351,10 @@ pub fn point_on_prolate_spheroid(
     search_parameter: f32,
 ) -> Vec3<f32> {
     let mut rng = rng();
-    // Use inclusive bounds so 0.0 and 1.0 can be sampled; construction is
-    // infallible for 0.0 < 1.0. Inclusive sampling avoids bias at the bounds
-    // for downstream calculations.
+    // Uniform distribution
+    // Use inclusive bounds for uniform spheroid point sampling to ensure
+    // proper coverage at the poles (θ=0, π) and complete azimuthal rotation (φ=0,
+    // 2π).
     let range = Uniform::new_inclusive(0.0, 1.0).expect("valid inclusive range");
 
     // Midpoint is used as the local origin

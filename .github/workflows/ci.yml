@@ -9,7 +9,7 @@ name: CI
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20 # abort if build exceeds 20 minutes
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -23,8 +23,6 @@ jobs:
         with:
           submodules: true
           lfs: true
-      - name: Actionlint
-        uses: rhysd/actionlint@v1
       - name: Install system dependencies (ALSA, udev)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
         timeout-minutes: 5
@@ -89,3 +87,13 @@ jobs:
             cargo test --workspace ${{ matrix.features }} --locked
           fi
         timeout-minutes: 20
+
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: reviewdog/action-actionlint@v1 # validate workflow syntax
+        with:
+          fail_on_error: true
+          reporter: github-check

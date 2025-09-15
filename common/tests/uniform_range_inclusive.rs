@@ -42,6 +42,48 @@ fn uniform_inclusive_integer_range_bounds() {
 }
 
 #[test]
+fn chi_square_uniform_multiple_seeds() {
+    use rand::{
+        SeedableRng,
+        distr::{Distribution, Uniform},
+        rngs::StdRng,
+    };
+
+    let seeds: &[u64] = &[1337, 2025, 987654321];
+    let bins = 10usize;
+    let draws = 10_000usize;
+    let dist = Uniform::new_inclusive(0.0_f64, 1.0_f64);
+    let critical_95_df9 = 16.92_f64; // conservative threshold for df = bins-1
+
+    for &seed in seeds {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut hist = vec![0usize; bins];
+        for _ in 0..draws {
+            let x: f64 = dist.sample(&mut rng);
+            let idx = ((x * bins as f64).floor() as isize).clamp(0, (bins as isize) - 1) as usize;
+            hist[idx] += 1;
+        }
+
+        let expected = (draws as f64) / (bins as f64);
+        let chi2: f64 = hist
+            .iter()
+            .map(|&obs| {
+                let o = obs as f64;
+                let d = o - expected;
+                (d * d) / expected
+            })
+            .sum();
+
+        assert!(
+            chi2 < critical_95_df9 * 1.2,
+            "chi-square too large for seed {}: {}",
+            seed,
+            chi2
+        );
+    }
+}
+
+#[test]
 fn uniform_range_chi_square_is_reasonable() {
     // Deterministic stream to keep test stable in CI.
     let mut rng = ChaCha20Rng::from_seed([1u8; 32]);

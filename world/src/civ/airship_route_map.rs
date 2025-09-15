@@ -24,7 +24,16 @@ use std::{borrow::Cow, env, error::Error, io::ErrorKind, path::PathBuf};
 use tracing::error;
 use vek::*;
 
-// TODO(#1234): Tracked in the issue tracker. Keep implementation notes synced with the issue.
+// TODO(#1234): Airship route map planning
+// - Integrate prevailing-wind model into cost function (favor tailwinds,
+//   penalize headwinds)
+// - Support no-fly zones and altitude bands in pathfinding constraints
+// - Cache computed routes per (origin, destination, conditions) and invalidate
+//   on world updates
+// - Persist minimal route summaries to save files; rebuild detailed paths on
+//   load
+// Keep these notes in sync with the linked issue for status and design
+// decisions.
 
 /// Wrapper for Pixmap so that the Asset trait can be implemented.
 /// This is necessary because Pixmap is in the tiny-skia crate.
