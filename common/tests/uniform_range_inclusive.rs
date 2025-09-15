@@ -112,16 +112,16 @@ fn uniform_range_chi_square_is_reasonable() {
         })
         .sum();
 
+    // 9 degrees of freedom; 95th percentile ≈ 16.92. Use a generous bound to avoid
+    // flakes while keeping statistical power near the 97.5% cutoff.
     // 9 degrees of freedom; critical values: 95% ≈ 16.92, 97.5% ≈ 19.02, 99% ≈
-    // 21.67. [sources: standard chi-square tables] Choose 20.0 to reduce flakes
-    // while remaining above the ~97.5% cutoff; this is stricter than 24.0
-    // yet still tolerant to sampling variability.
-    let threshold = 20.0;
+    // 21.67. Sources: standard chi-square tables.
+    const CHI_SQUARE_THRESHOLD: f64 = 20.0;
     assert!(
-        chi_sq < threshold,
+        chi_sq < CHI_SQUARE_THRESHOLD,
         "chi^2={} exceeds threshold {} with counts={:?}",
         chi_sq,
-        threshold,
+        CHI_SQUARE_THRESHOLD,
         counts
     );
 }

@@ -60,7 +60,7 @@ jobs:
       - name: Clippy
         run: |
           if [ -z "${{ matrix.features }}" ]; then
-            cargo clippy --workspace --all-targets -- -D warnings
+            cargo clippy --workspace --all-targets --all-features -- -D warnings
           else
             cargo clippy --workspace --all-targets ${{ matrix.features }} -- -D warnings
           fi
