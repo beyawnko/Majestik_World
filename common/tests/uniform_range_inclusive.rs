@@ -1,6 +1,9 @@
 // common/tests/uniform_range_inclusive.rs
-use rand::{Rng, SeedableRng, distr::Uniform};
-use rand_chacha::ChaCha8Rng;
+use rand::{
+    Rng, SeedableRng,
+    distr::{Distribution, Uniform},
+};
+use rand_chacha::{ChaCha8Rng, ChaCha20Rng};
 
 #[test]
 fn uniform_range_samples_are_inclusive_0_1() {
@@ -30,16 +33,53 @@ fn uniform_inclusive_integer_range_bounds() {
     for _ in 0..ITERATIONS {
         let v = rng.sample(dist);
         assert!((0..=10).contains(&v));
-        if v < min_seen {
-            min_seen = v;
-        }
-        if v > max_seen {
-            max_seen = v;
-        }
+        min_seen = min_seen.min(v);
+        max_seen = max_seen.max(v);
     }
     // For integer ranges with 10_000 draws, expect both bounds to be seen.
     assert_eq!(min_seen, 0, "minimum bound 0 was not seen");
     assert_eq!(max_seen, 10, "maximum bound 10 was not seen");
+}
+
+#[test]
+fn uniform_range_chi_square_is_reasonable() {
+    // Deterministic stream to keep test stable in CI.
+    let mut rng = ChaCha20Rng::from_seed([1u8; 32]);
+    let dist = Uniform::new_inclusive(0.0f64, 1.0);
+
+    const BINS: usize = 10;
+    const N: usize = 50_000;
+    let mut counts = [0usize; BINS];
+
+    for _ in 0..N {
+        let x = dist.sample(&mut rng);
+        let idx = if x == 1.0 {
+            BINS - 1
+        } else {
+            (x * BINS as f64) as usize
+        };
+        counts[idx] += 1;
+    }
+
+    let expected = (N as f64) / (BINS as f64);
+    let chi_sq: f64 = counts
+        .iter()
+        .map(|&c| {
+            let diff = c as f64 - expected;
+            diff * diff / expected
+        })
+        .sum();
+
+    // 9 degrees of freedom; 95th percentile ≈ 16.92. Use a generous bound to avoid
+    // flakes.
+    let threshold = 24.0;
+    assert!(
+        chi_sq < threshold,
+        "chi^2={} exceeds threshold {} with counts={:?}",
+        chi_sq,
+        threshold,
+        counts
+    );
 }
 
 #[test]

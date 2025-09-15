@@ -9,13 +9,22 @@ name: CI
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30 # abort if build exceeds 30 minutes
+    timeout-minutes: 20 # abort if build exceeds 20 minutes
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - ""
+          # Fill with mutually exclusive sets, e.g. "--no-default-features --features be-dyn-lib"
+          # and "--no-default-features --features use-dyn-lib"
     steps:
       - uses: actions/checkout@v4
         timeout-minutes: 5
         with:
           submodules: true
           lfs: true
+      - name: Actionlint
+        uses: rhysd/actionlint@v1
       - name: Install system dependencies (ALSA, udev)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
         timeout-minutes: 5
@@ -41,7 +50,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('rust-toolchain.toml', '.tool-versions') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
       - name: Install rust components
@@ -52,10 +61,11 @@ jobs:
         timeout-minutes: 5
       - name: Clippy
         run: |
-          cargo clippy \
-            --workspace \
-            --all-targets \
-            -- -D warnings
+          if [ -z "${{ matrix.features }}" ]; then
+            cargo clippy --workspace --all-targets --all-features -- -D warnings
+          else
+            cargo clippy --workspace --all-targets ${{ matrix.features }} -- -D warnings
+          fi
         timeout-minutes: 15
 
       - name: Cache advisory DB
@@ -72,5 +82,10 @@ jobs:
         timeout-minutes: 5
 
       - name: Test
-        run: cargo test --workspace --locked
+        run: |
+          if [ -z "${{ matrix.features }}" ]; then
+            cargo test --workspace --all-features --locked
+          else
+            cargo test --workspace ${{ matrix.features }} --locked
+          fi
         timeout-minutes: 20

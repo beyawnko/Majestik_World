@@ -24,11 +24,7 @@ use std::{borrow::Cow, env, error::Error, io::ErrorKind, path::PathBuf};
 use tracing::error;
 use vek::*;
 
-// Tracking: see GitHub issue #1234. Implement `fn load(cache: &AssetCache,
-// path: &SharedString) -> Result<Self, Box<dyn StdError + Send + Sync>>` for
-// `PackedSpritesPixmap` and `TinySkiaSpriteMapMeta`, then remove legacy
-// associated items `type Loader` and `const EXTENSION`.
-// Temporary compilation unblock currently happens in CI; see COR-003.
+// TODO(#1234): Tracked in the issue tracker. Keep implementation notes synced with the issue.
 
 /// Wrapper for Pixmap so that the Asset trait can be implemented.
 /// This is necessary because Pixmap is in the tiny-skia crate.
