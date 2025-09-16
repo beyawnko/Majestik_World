@@ -41,6 +41,10 @@ fn uniform_inclusive_integer_range_bounds() {
     assert_eq!(max_seen, 10, "maximum bound 10 was not seen");
 }
 
+/// Critical chi-square value at 95% confidence for 9 degrees of freedom (10
+/// bins - 1). Used to validate uniformity across RNG seeds in chi-square tests.
+const CRITICAL_95_DF9: f64 = 16.92_f64;
+
 #[test]
 fn chi_square_uniform_multiple_seeds() {
     use rand::{
@@ -53,7 +57,7 @@ fn chi_square_uniform_multiple_seeds() {
     let bins = 10usize;
     let draws = 10_000usize;
     let dist = Uniform::new_inclusive(0.0_f64, 1.0_f64).expect("valid range");
-    let critical_95_df9 = 16.92_f64; // conservative threshold for df = bins-1
+    let critical_95_df9 = CRITICAL_95_DF9; // conservative threshold for df = bins-1
 
     for &seed in seeds {
         let mut rng = StdRng::seed_from_u64(seed);

@@ -26,3 +26,12 @@ exclusions exist for technical reasons.
 - Default lint/test jobs run with `--all-features` to keep additive flags healthy.
 - Matrix entries cover `be-dyn-lib` and `use-dyn-lib` individually (with `--no-default-features`) to ensure each constrained
   configuration continues to compile.
+
+### Testing strategies
+
+- Prefer a feature matrix over `--all-features` when flags are mutually exclusive or alter linkage modes.
+- For `airship_maps`, avoid forcing it on in global `--all-features`; instead, test it explicitly in matrix entries to prevent
+  invalid combinations.
+- Where helpful, use `--no-default-features` to isolate feature surfaces and ensure minimal configs compile and test cleanly.
+- If using tools like cargo-all-features/cargo-hack, configure allow/deny lists to skip known-conflicting combos and document the
+  rationale here.

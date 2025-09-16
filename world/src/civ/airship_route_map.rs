@@ -49,7 +49,7 @@ impl FileAsset for PackedSpritesPixmap {
     fn from_bytes(bytes: Cow<[u8]>) -> Result<Self, BoxedError> {
         Pixmap::decode_png(bytes.as_ref())
             .map(PackedSpritesPixmap)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e).into())
+            .map_err(Into::into)
     }
 }
 

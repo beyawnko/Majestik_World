@@ -82,6 +82,8 @@ jobs:
       - name: Test
         run: |
           if [ -z "${{ matrix.features }}" ]; then
+            # Do not use --all-features here; the matrix enumerates valid feature sets
+            # and some flags are mutually exclusive. Combining them would fail builds.
             cargo test --workspace --locked
           else
             cargo test --workspace ${{ matrix.features }} --locked
