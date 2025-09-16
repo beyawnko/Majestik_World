@@ -20,7 +20,7 @@ use tiny_skia::{
     Transform,
 };
 
-use std::{borrow::Cow, env, error::Error, path::PathBuf};
+use std::{borrow::Cow, env, error::Error, io, path::PathBuf};
 use tracing::error;
 use vek::*;
 
@@ -49,7 +49,7 @@ impl FileAsset for PackedSpritesPixmap {
     fn from_bytes(bytes: Cow<[u8]>) -> Result<Self, BoxedError> {
         Pixmap::decode_png(bytes.as_ref())
             .map(PackedSpritesPixmap)
-            .map_err(Into::into)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e).into())
     }
 }
 
