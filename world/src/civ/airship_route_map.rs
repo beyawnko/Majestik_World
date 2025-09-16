@@ -205,8 +205,7 @@ impl FileAsset for TinySkiaSpriteMapMeta {
     const EXTENSIONS: &'static [&'static str] = &["ron"];
 
     fn from_bytes(bytes: Cow<[u8]>) -> Result<Self, BoxedError> {
-        ron::de::from_bytes(bytes.as_ref())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e).into())
+        ron::de::from_bytes(bytes.as_ref()).map_err(Into::into)
     }
 }
 
