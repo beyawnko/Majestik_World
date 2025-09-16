@@ -9,8 +9,7 @@ use rand_chacha::{ChaCha8Rng, ChaCha20Rng};
 // 19.02, 99% ≈ 21.67. Choose a 20.0 cutoff to reduce flakes while staying near
 // the 97.5% quantile.
 const CRITICAL_95_DF9: f64 = 16.92_f64;
-const CHI_SQUARE_TOLERANCE_FACTOR: f64 = 1.2_f64;
-const CHI_SQUARE_THRESHOLD: f64 = 20.0_f64;
+const CHI_SQUARE_THRESHOLD: f64 = 20.0_f64; // Shared cutoff for all chi-square checks in this module.
 
 #[test]
 fn uniform_range_samples_are_inclusive_0_1() {
@@ -81,11 +80,12 @@ fn chi_square_uniform_multiple_seeds() {
             .sum();
 
         assert!(
-            chi2 < CRITICAL_95_DF9 * CHI_SQUARE_TOLERANCE_FACTOR,
-            "chi-square too large for seed {}: {} (threshold {})",
+            chi2 < CHI_SQUARE_THRESHOLD,
+            "chi-square too large for seed {}: {} (threshold {}, 95% critical {})",
             seed,
             chi2,
-            CRITICAL_95_DF9 * CHI_SQUARE_TOLERANCE_FACTOR,
+            CHI_SQUARE_THRESHOLD,
+            CRITICAL_95_DF9,
         );
     }
 }

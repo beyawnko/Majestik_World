@@ -7,7 +7,7 @@ use crate::{
     util::{DHashMap, DHashSet},
 };
 use common::{
-    assets::{self, AssetExt, BoxedError, FileAsset},
+    assets::{AssetExt, BoxedError, FileAsset},
     terrain::{
         map::{MapConfig, MapSample, MapSizeLg},
         uniform_idx_as_vec2,
@@ -49,7 +49,7 @@ impl FileAsset for PackedSpritesPixmap {
     fn from_bytes(bytes: Cow<[u8]>) -> Result<Self, BoxedError> {
         Pixmap::decode_png(bytes.as_ref())
             .map(PackedSpritesPixmap)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e).into())
+            .map_err(Into::into)
     }
 }
 
@@ -204,8 +204,9 @@ struct TinySkiaSpriteMapMeta {
 impl FileAsset for TinySkiaSpriteMapMeta {
     const EXTENSIONS: &'static [&'static str] = &["ron"];
 
-    fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Result<Self, BoxedError> {
-        assets::load_ron(&bytes)
+    fn from_bytes(bytes: Cow<[u8]>) -> Result<Self, BoxedError> {
+        ron::de::from_bytes(bytes.as_ref())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e).into())
     }
 }
 
@@ -985,4 +986,30 @@ pub fn export_docknodes(
     pixmap
         .save_png(output_path)
         .map_err(|e| format!("Failed to save output image: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::assets::FileAsset;
+
+    #[test]
+    fn tiny_skia_sprite_meta_invalid_ron_is_err() {
+        let bytes = Cow::from(b"not: ron".as_slice());
+        let result = <TinySkiaSpriteMapMeta as FileAsset>::from_bytes(bytes);
+        assert!(
+            result.is_err(),
+            "expected invalid RON input to return an error"
+        );
+    }
+
+    #[test]
+    fn packed_sprites_pixmap_rejects_non_png() {
+        let bytes = Cow::from(b"\x00\x01\x02 not a png".as_slice());
+        let result = <PackedSpritesPixmap as FileAsset>::from_bytes(bytes);
+        assert!(
+            result.is_err(),
+            "expected invalid PNG input to return an error"
+        );
+    }
 }
