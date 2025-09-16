@@ -57,7 +57,6 @@ fn chi_square_uniform_multiple_seeds() {
     let bins = 10usize;
     let draws = 10_000usize;
     let dist = Uniform::new_inclusive(0.0_f64, 1.0_f64).expect("valid range");
-    let critical_95_df9 = CRITICAL_95_DF9; // conservative threshold for df = bins-1
 
     for &seed in seeds {
         let mut rng = StdRng::seed_from_u64(seed);
@@ -79,7 +78,7 @@ fn chi_square_uniform_multiple_seeds() {
             .sum();
 
         assert!(
-            chi2 < critical_95_df9 * 1.2,
+            chi2 < CRITICAL_95_DF9 * 1.2,
             "chi-square too large for seed {}: {}",
             seed,
             chi2

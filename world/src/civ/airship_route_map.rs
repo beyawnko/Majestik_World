@@ -202,7 +202,7 @@ struct TinySkiaSpriteMapMeta {
 
 /// Allows a TinySkiaSpriteMapMeta to be loaded using the asset system.
 impl FileAsset for TinySkiaSpriteMapMeta {
-    const EXTENSION: &'static str = "ron";
+    const EXTENSIONS: &'static [&'static str] = &["ron"];
 
     fn from_bytes(bytes: Cow<[u8]>) -> Result<Self, BoxedError> { assets::load_ron(&bytes) }
 }
