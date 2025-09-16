@@ -30,6 +30,8 @@ default = ["simd"]
 
 [package.metadata.cargo-all-features]
 # Skip mutually exclusive features when building with --all-features
+# Also skip 'airship_maps' because it pulls in tiny-skia/assets and does not compose with the
+# dynamic-lib flags; CI covers it via a dedicated matrix entry instead of --all-features.
 skip = ["be-dyn-lib", "use-dyn-lib", "airship_maps"]
 
 [dependencies]

@@ -37,3 +37,12 @@ exclusions exist for technical reasons.
 - Where helpful, use `--no-default-features` to isolate feature surfaces and ensure minimal configs compile and test cleanly.
 - If using tools like cargo-all-features/cargo-hack, configure allow/deny lists to skip known-conflicting combos and document the
   rationale here.
+
+For local verification, you can quickly exercise the main configurations:
+
+```sh
+cargo test --workspace --all-features
+cargo test -p veloren-world --no-default-features --features be-dyn-lib
+cargo test -p veloren-world --no-default-features --features use-dyn-lib
+cargo check -p veloren-world --features airship_maps
+```

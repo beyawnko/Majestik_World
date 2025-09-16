@@ -58,10 +58,8 @@ fn chi_square_uniform_multiple_seeds() {
     let seeds: &[u64] = &[1337, 2025, 987654321];
     let bins = 10usize;
     let draws = 10_000usize;
-    let dist = match Uniform::new_inclusive(0.0_f64, 1.0_f64) {
-        Ok(dist) => dist,
-        Err(_) => unreachable!("inclusive unit interval should be valid"),
-    };
+    let dist =
+        Uniform::new_inclusive(0.0_f64, 1.0_f64).expect("inclusive unit interval should be valid");
 
     for &seed in seeds {
         let mut rng = StdRng::seed_from_u64(seed);

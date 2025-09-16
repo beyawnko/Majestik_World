@@ -47,9 +47,11 @@ impl FileAsset for PackedSpritesPixmap {
     const EXTENSIONS: &'static [&'static str] = &["png"];
 
     fn from_bytes(bytes: Cow<[u8]>) -> Result<Self, BoxedError> {
-        Pixmap::decode_png(bytes.as_ref())
-            .map(PackedSpritesPixmap)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e).into())
+        let pixmap = Pixmap::decode_png(bytes.as_ref()).map_err(|e| {
+            let classified = io::Error::new(io::ErrorKind::InvalidData, e);
+            Box::new(classified) as BoxedError
+        })?;
+        Ok(PackedSpritesPixmap(pixmap))
     }
 }
 
@@ -1003,12 +1005,45 @@ mod tests {
     }
 
     #[test]
+    fn tiny_skia_sprite_meta_valid_ron_parses() {
+        let ron = r#"
+            (
+                texture_width: 16,
+                texture_height: 32,
+                sprites_meta: [
+                    (
+                        id: "compass",
+                        x: 0,
+                        y: 1,
+                        width: 8,
+                        height: 8,
+                    ),
+                ],
+            )
+        "#;
+        let bytes = Cow::from(ron.as_bytes());
+        let meta = <TinySkiaSpriteMapMeta as FileAsset>::from_bytes(bytes)
+            .expect("valid RON payload should deserialize");
+        assert_eq!(meta.texture_width, 16);
+        assert_eq!(meta.texture_height, 32);
+        assert_eq!(meta.sprites_meta.len(), 1);
+        assert_eq!(meta.sprites_meta[0].id, "compass");
+        assert_eq!(meta.sprites_meta[0].width, 8);
+        assert_eq!(meta.sprites_meta[0].height, 8);
+    }
+
+    #[test]
     fn packed_sprites_pixmap_rejects_non_png() {
         let bytes = Cow::from(b"\x00\x01\x02 not a png".as_slice());
-        let result = <PackedSpritesPixmap as FileAsset>::from_bytes(bytes);
+        let err = <PackedSpritesPixmap as FileAsset>::from_bytes(bytes)
+            .expect_err("malformed PNG input should yield an error");
+        let io_err = err
+            .downcast::<io::Error>()
+            .expect("error should downcast to io::Error");
+        assert_eq!(io_err.kind(), io::ErrorKind::InvalidData);
         assert!(
-            result.is_err(),
-            "expected invalid PNG input to return an error"
+            io_err.get_ref().is_some(),
+            "original tiny-skia error should be retained as the source"
         );
     }
 }
