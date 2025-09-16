@@ -1027,9 +1027,12 @@ mod tests {
         assert_eq!(meta.texture_width, 16);
         assert_eq!(meta.texture_height, 32);
         assert_eq!(meta.sprites_meta.len(), 1);
-        assert_eq!(meta.sprites_meta[0].id, "compass");
-        assert_eq!(meta.sprites_meta[0].width, 8);
-        assert_eq!(meta.sprites_meta[0].height, 8);
+        let sprite_meta = &meta.sprites_meta[0];
+        assert_eq!(sprite_meta.id, "compass");
+        assert_eq!(sprite_meta.x, 0);
+        assert_eq!(sprite_meta.y, 1);
+        assert_eq!(sprite_meta.width, 8);
+        assert_eq!(sprite_meta.height, 8);
     }
 
     #[test]
@@ -1042,7 +1045,7 @@ mod tests {
             .expect("error should downcast to io::Error");
         assert_eq!(io_err.kind(), io::ErrorKind::InvalidData);
         assert!(
-            io_err.get_ref().is_some(),
+            io_err.source().is_some(),
             "original tiny-skia error should be retained as the source"
         );
     }

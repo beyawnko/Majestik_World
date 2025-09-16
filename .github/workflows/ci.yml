@@ -17,6 +17,7 @@ jobs:
           - ""
           - "--no-default-features --features be-dyn-lib"
           - "--no-default-features --features use-dyn-lib"
+          - "--features airship_maps"
     steps:
       - uses: actions/checkout@v4
         timeout-minutes: 5
