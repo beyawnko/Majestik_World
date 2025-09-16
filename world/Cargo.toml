@@ -30,7 +30,7 @@ default = ["simd"]
 
 [package.metadata.cargo-all-features]
 # Skip mutually exclusive features when building with --all-features
-skip = ["be-dyn-lib", "use-dyn-lib"]
+skip = ["be-dyn-lib", "use-dyn-lib", "airship_maps"]
 
 [dependencies]
 common = { package = "veloren-common", path = "../common" }

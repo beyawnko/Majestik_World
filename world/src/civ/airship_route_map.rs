@@ -49,7 +49,7 @@ impl FileAsset for PackedSpritesPixmap {
     fn from_bytes(bytes: Cow<[u8]>) -> Result<Self, BoxedError> {
         Pixmap::decode_png(bytes.as_ref())
             .map(PackedSpritesPixmap)
-            .map_err(Into::into)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e).into())
     }
 }
 
@@ -204,7 +204,9 @@ struct TinySkiaSpriteMapMeta {
 impl FileAsset for TinySkiaSpriteMapMeta {
     const EXTENSIONS: &'static [&'static str] = &["ron"];
 
-    fn from_bytes(bytes: Cow<[u8]>) -> Result<Self, BoxedError> { assets::load_ron(&bytes) }
+    fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Result<Self, BoxedError> {
+        assets::load_ron(&bytes)
+    }
 }
 
 /// A set of sprites that are unpacked from a larger sprite map image.

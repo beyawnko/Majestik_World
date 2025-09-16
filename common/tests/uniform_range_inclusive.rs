@@ -5,6 +5,13 @@ use rand::{
 };
 use rand_chacha::{ChaCha8Rng, ChaCha20Rng};
 
+// Chi-square critical values for df = 9 (10 bins - 1): 95% ≈ 16.92, 97.5% ≈
+// 19.02, 99% ≈ 21.67. Choose a 20.0 cutoff to reduce flakes while staying near
+// the 97.5% quantile.
+const CRITICAL_95_DF9: f64 = 16.92_f64;
+const CHI_SQUARE_TOLERANCE_FACTOR: f64 = 1.2_f64;
+const CHI_SQUARE_THRESHOLD: f64 = 20.0_f64;
+
 #[test]
 fn uniform_range_samples_are_inclusive_0_1() {
     const SEED: [u8; 32] = [0u8; 32]; // Chosen for determinism; covers bound cases with inclusive dist
@@ -41,10 +48,6 @@ fn uniform_inclusive_integer_range_bounds() {
     assert_eq!(max_seen, 10, "maximum bound 10 was not seen");
 }
 
-/// Critical chi-square value at 95% confidence for 9 degrees of freedom (10
-/// bins - 1). Used to validate uniformity across RNG seeds in chi-square tests.
-const CRITICAL_95_DF9: f64 = 16.92_f64;
-
 #[test]
 fn chi_square_uniform_multiple_seeds() {
     use rand::{
@@ -78,10 +81,11 @@ fn chi_square_uniform_multiple_seeds() {
             .sum();
 
         assert!(
-            chi2 < CRITICAL_95_DF9 * 1.2,
-            "chi-square too large for seed {}: {}",
+            chi2 < CRITICAL_95_DF9 * CHI_SQUARE_TOLERANCE_FACTOR,
+            "chi-square too large for seed {}: {} (threshold {})",
             seed,
-            chi2
+            chi2,
+            CRITICAL_95_DF9 * CHI_SQUARE_TOLERANCE_FACTOR,
         );
     }
 }
@@ -115,16 +119,15 @@ fn uniform_range_chi_square_is_reasonable() {
         })
         .sum();
 
-    // 9 degrees of freedom; 95th percentile ≈ 16.92. Use a generous bound to avoid
-    // flakes while keeping statistical power near the 97.5% cutoff.
-    // 9 degrees of freedom; critical values: 95% ≈ 16.92, 97.5% ≈ 19.02, 99% ≈
-    // 21.67. Sources: standard chi-square tables.
-    const CHI_SQUARE_THRESHOLD: f64 = 20.0;
+    // 9 degrees of freedom; criticals 95% ≈ 16.92, 97.5% ≈ 19.02, 99% ≈ 21.67.
+    // Use 20.0 to reduce flakes while keeping statistical power near the 97.5%
+    // cutoff.
+    let threshold = CHI_SQUARE_THRESHOLD;
     assert!(
-        chi_sq < CHI_SQUARE_THRESHOLD,
+        chi_sq < threshold,
         "chi^2={} exceeds threshold {} with counts={:?}",
         chi_sq,
-        CHI_SQUARE_THRESHOLD,
+        threshold,
         counts
     );
 }

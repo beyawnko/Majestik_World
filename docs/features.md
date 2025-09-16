@@ -8,6 +8,8 @@ exclusions exist for technical reasons.
 - Prefer additive feature flags so that `--all-features` builds stay healthy across the workspace.
 - If two flags cannot be enabled together, guard them with `compile_error!` and list the rationale in this document.
 - Keep CI feature matrices in sync with this file so incompatibilities are exercised intentionally instead of accidentally.
+- The `airship_maps` feature is intentionally skipped under `--all-features` to avoid invalid combinations in automation; CI
+  enumerates valid sets explicitly.
 
 ## veloren-world
 
