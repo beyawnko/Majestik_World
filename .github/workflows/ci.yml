@@ -9,14 +9,15 @@ name: CI
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         features:
           - ""
-          # Fill with mutually exclusive sets, e.g. "--no-default-features --features be-dyn-lib"
-          # and "--no-default-features --features use-dyn-lib"
+          - "--no-default-features --features be-dyn-lib"
+          - "--no-default-features --features use-dyn-lib"
+          - "--features airship_maps"
     steps:
       - uses: actions/checkout@v4
         timeout-minutes: 5
@@ -60,7 +61,8 @@ jobs:
       - name: Clippy
         run: |
           if [ -z "${{ matrix.features }}" ]; then
-            cargo clippy --workspace --all-targets --all-features -- -D warnings
+            cargo clippy --workspace --all-targets -- -D warnings
+            cargo check -p veloren-common --all-features --locked
           else
             cargo clippy --workspace --all-targets ${{ matrix.features }} -- -D warnings
           fi
@@ -82,7 +84,9 @@ jobs:
       - name: Test
         run: |
           if [ -z "${{ matrix.features }}" ]; then
-            cargo test --workspace --all-features --locked
+            # Do not use --all-features here; the matrix enumerates valid feature sets
+            # and some flags are mutually exclusive. Combining them would fail builds.
+            cargo test --workspace --locked
           else
             cargo test --workspace ${{ matrix.features }} --locked
           fi

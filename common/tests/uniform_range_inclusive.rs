@@ -5,6 +5,12 @@ use rand::{
 };
 use rand_chacha::{ChaCha8Rng, ChaCha20Rng};
 
+// Chi-square critical values for df = 9 (10 bins - 1): 95% ≈ 16.92, 97.5% ≈
+// 19.02, 99% ≈ 21.67. Choose a 20.0 cutoff to reduce flakes while staying near
+// the 97.5% quantile.
+const CRITICAL_95_DF9: f64 = 16.92;
+const CHI_SQUARE_THRESHOLD: f64 = 20.0; // Shared cutoff for all chi-square checks in this module.
+
 #[test]
 fn uniform_range_samples_are_inclusive_0_1() {
     const SEED: [u8; 32] = [0u8; 32]; // Chosen for determinism; covers bound cases with inclusive dist
@@ -52,8 +58,9 @@ fn chi_square_uniform_multiple_seeds() {
     let seeds: &[u64] = &[1337, 2025, 987654321];
     let bins = 10usize;
     let draws = 10_000usize;
-    let dist = Uniform::new_inclusive(0.0_f64, 1.0_f64);
-    let critical_95_df9 = 16.92_f64; // conservative threshold for df = bins-1
+    let Ok(dist) = Uniform::new_inclusive(0.0_f64, 1.0_f64) else {
+        unreachable!("inclusive unit interval should be valid");
+    };
 
     for &seed in seeds {
         let mut rng = StdRng::seed_from_u64(seed);
@@ -75,10 +82,12 @@ fn chi_square_uniform_multiple_seeds() {
             .sum();
 
         assert!(
-            chi2 < critical_95_df9 * 1.2,
-            "chi-square too large for seed {}: {}",
+            chi2 < CHI_SQUARE_THRESHOLD,
+            "chi-square too large for seed {}: {} (threshold {}, 95% critical {})",
             seed,
-            chi2
+            chi2,
+            CHI_SQUARE_THRESHOLD,
+            CRITICAL_95_DF9,
         );
     }
 }
@@ -87,7 +96,9 @@ fn chi_square_uniform_multiple_seeds() {
 fn uniform_range_chi_square_is_reasonable() {
     // Deterministic stream to keep test stable in CI.
     let mut rng = ChaCha20Rng::from_seed([1u8; 32]);
-    let dist = Uniform::new_inclusive(0.0f64, 1.0);
+    let Ok(dist) = Uniform::new_inclusive(0.0f64, 1.0) else {
+        unreachable!("inclusive unit interval should be valid");
+    };
 
     const BINS: usize = 10;
     const N: usize = 50_000;
@@ -112,9 +123,10 @@ fn uniform_range_chi_square_is_reasonable() {
         })
         .sum();
 
-    // 9 degrees of freedom; 95th percentile ≈ 16.92. Use a generous bound to avoid
-    // flakes.
-    let threshold = 24.0;
+    // 9 degrees of freedom; criticals 95% ≈ 16.92, 97.5% ≈ 19.02, 99% ≈ 21.67.
+    // Use 20.0 to reduce flakes while keeping statistical power near the 97.5%
+    // cutoff.
+    let threshold = CHI_SQUARE_THRESHOLD;
     assert!(
         chi_sq < threshold,
         "chi^2={} exceeds threshold {} with counts={:?}",
