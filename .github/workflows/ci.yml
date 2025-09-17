@@ -59,14 +59,15 @@ jobs:
         run: cargo fmt --all -- --check
         timeout-minutes: 5
       - name: Clippy
+        if: ${{ matrix.features == '' }}
         run: |
-          if [ -z "${{ matrix.features }}" ]; then
-            cargo clippy --workspace --all-targets -- -D warnings
-            cargo check -p veloren-common --all-features --locked
-          else
-            cargo clippy --workspace --all-targets ${{ matrix.features }} -- -D warnings
-          fi
-        timeout-minutes: 15
+          set -euo pipefail
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy --workspace --all-targets --no-default-features --features be-dyn-lib -- -D warnings
+          cargo clippy --workspace --all-targets --no-default-features --features use-dyn-lib -- -D warnings
+          cargo clippy --workspace --all-targets --features airship_maps -- -D warnings
+          cargo check -p veloren-common --all-features --locked
+        timeout-minutes: 25
 
       - name: Cache advisory DB
         uses: actions/cache@v4
