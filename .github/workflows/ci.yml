@@ -62,6 +62,7 @@ jobs:
         run: |
           if [ -z "${{ matrix.features }}" ]; then
             cargo clippy --workspace --all-targets -- -D warnings
+            cargo check -p veloren-common --all-features --locked
           else
             cargo clippy --workspace --all-targets ${{ matrix.features }} -- -D warnings
           fi
