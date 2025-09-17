@@ -4,6 +4,20 @@ use rand::{
     distr::{Distribution, Uniform},
 };
 use rand_chacha::{ChaCha8Rng, ChaCha20Rng};
+use std::env;
+
+// Chi-square critical values for df = 9 (10 bins - 1): 95% ≈ 16.92, 97.5% ≈
+// 19.02, 99% ≈ 21.67. Choose a 20.0 cutoff to reduce flakes while staying near
+// the 97.5% quantile.
+const CRITICAL_95_DF9: f64 = 16.92;
+const CHI_SQUARE_THRESHOLD: f64 = 20.0; // Shared cutoff for all chi-square checks in this module.
+
+fn chi_square_cutoff_from_env() -> f64 {
+    env::var("CRITICAL_X2_DF9")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(CHI_SQUARE_THRESHOLD)
+}
 
 #[test]
 fn uniform_range_samples_are_inclusive_0_1() {
@@ -52,15 +66,25 @@ fn chi_square_uniform_multiple_seeds() {
     let seeds: &[u64] = &[1337, 2025, 987654321];
     let bins = 10usize;
     let draws = 10_000usize;
-    let dist = Uniform::new_inclusive(0.0_f64, 1.0_f64);
-    let critical_95_df9 = 16.92_f64; // conservative threshold for df = bins-1
+    let dist =
+        Uniform::new_inclusive(0.0_f64, 1.0_f64).expect("inclusive unit interval should be valid");
+    let critical_cutoff = chi_square_cutoff_from_env();
 
     for &seed in seeds {
         let mut rng = StdRng::seed_from_u64(seed);
         let mut hist = vec![0usize; bins];
         for _ in 0..draws {
             let x: f64 = dist.sample(&mut rng);
-            let idx = ((x * bins as f64).floor() as isize).clamp(0, (bins as isize) - 1) as usize;
+            assert!(
+                (0.0..=1.0).contains(&x),
+                "uniform sample out of [0,1]: {}",
+                x
+            );
+            let idx = if x == 1.0 {
+                bins - 1
+            } else {
+                (x * bins as f64) as usize
+            };
             hist[idx] += 1;
         }
 
@@ -75,10 +99,12 @@ fn chi_square_uniform_multiple_seeds() {
             .sum();
 
         assert!(
-            chi2 < critical_95_df9 * 1.2,
-            "chi-square too large for seed {}: {}",
+            chi2 < critical_cutoff,
+            "chi-square too large for seed {}: {} (cutoff {}, 95% critical {})",
             seed,
-            chi2
+            chi2,
+            critical_cutoff,
+            CRITICAL_95_DF9,
         );
     }
 }
@@ -87,7 +113,8 @@ fn chi_square_uniform_multiple_seeds() {
 fn uniform_range_chi_square_is_reasonable() {
     // Deterministic stream to keep test stable in CI.
     let mut rng = ChaCha20Rng::from_seed([1u8; 32]);
-    let dist = Uniform::new_inclusive(0.0f64, 1.0);
+    let dist =
+        Uniform::new_inclusive(0.0f64, 1.0).expect("inclusive unit interval should be valid");
 
     const BINS: usize = 10;
     const N: usize = 50_000;
@@ -95,6 +122,7 @@ fn uniform_range_chi_square_is_reasonable() {
 
     for _ in 0..N {
         let x = dist.sample(&mut rng);
+        assert!((0.0..=1.0).contains(&x), "sample out of [0,1]: {}", x);
         let idx = if x == 1.0 {
             BINS - 1
         } else {
@@ -112,9 +140,10 @@ fn uniform_range_chi_square_is_reasonable() {
         })
         .sum();
 
-    // 9 degrees of freedom; 95th percentile ≈ 16.92. Use a generous bound to avoid
-    // flakes.
-    let threshold = 24.0;
+    // 9 degrees of freedom; criticals 95% ≈ 16.92, 97.5% ≈ 19.02, 99% ≈ 21.67.
+    // Use 20.0 to reduce flakes while keeping statistical power near the 97.5%
+    // cutoff.
+    let threshold = chi_square_cutoff_from_env();
     assert!(
         chi_sq < threshold,
         "chi^2={} exceeds threshold {} with counts={:?}",

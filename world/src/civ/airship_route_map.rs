@@ -7,7 +7,7 @@ use crate::{
     util::{DHashMap, DHashSet},
 };
 use common::{
-    assets::{self, Asset, AssetExt, BoxedError, Loader},
+    assets::{AssetExt, BoxedError, FileAsset},
     terrain::{
         map::{MapConfig, MapSample, MapSizeLg},
         uniform_idx_as_vec2,
@@ -20,7 +20,7 @@ use tiny_skia::{
     Transform,
 };
 
-use std::{borrow::Cow, env, error::Error, io::ErrorKind, path::PathBuf};
+use std::{borrow::Cow, env, error::Error, io, path::PathBuf};
 use tracing::error;
 use vek::*;
 
@@ -28,6 +28,8 @@ use vek::*;
 // - Integrate prevailing-wind model into cost function (favor tailwinds,
 //   penalize headwinds)
 // - Support no-fly zones and altitude bands in pathfinding constraints
+// - Index no-fly polygons with an R-tree (e.g., rstar) to accelerate spatial
+//   queries and reduce per-step pathfinding cost
 // - Cache computed routes per (origin, destination, conditions) and invalidate
 //   on world updates
 // - Persist minimal route summaries to save files; rebuild detailed paths on
@@ -35,33 +37,23 @@ use vek::*;
 // Keep these notes in sync with the linked issue for status and design
 // decisions.
 
-/// Wrapper for Pixmap so that the Asset trait can be implemented.
+/// Wrapper for Pixmap so that the FileAsset blanket `Asset` impl can be used.
 /// This is necessary because Pixmap is in the tiny-skia crate.
 pub struct PackedSpritesPixmap(pub Pixmap);
 
-// Custom Asset loader that loads a tiny_skia::Pixmap from a PNG file.
-pub struct PackedSpritesPixmapLoader;
+// Load PackedSpritesPixmap directly from PNG bytes via the FileAsset blanket
+// Asset impl.
+impl FileAsset for PackedSpritesPixmap {
+    const EXTENSIONS: &'static [&'static str] = &["png"];
 
-impl Loader<PackedSpritesPixmap> for PackedSpritesPixmapLoader {
-    fn load(content: Cow<[u8]>, ext: &str) -> Result<PackedSpritesPixmap, BoxedError> {
-        if ext != "png" {
-            return Err(Box::new(std::io::Error::new(
-                ErrorKind::Unsupported,
-                format!("Unsupported image format: {}", ext),
-            )));
-        }
-        match Pixmap::decode_png(&content) {
-            Ok(pixmap) => Ok(PackedSpritesPixmap(pixmap)),
-            Err(e) => Err(Box::new(e)),
-        }
+    fn from_bytes(bytes: Cow<[u8]>) -> Result<Self, BoxedError> {
+        let pixmap = Pixmap::decode_png(bytes.as_ref()).map_err(|e| {
+            let msg = format!("Failed to decode PNG: {}", e);
+            let classified = io::Error::new(io::ErrorKind::InvalidData, msg);
+            Box::new(classified) as BoxedError
+        })?;
+        Ok(PackedSpritesPixmap(pixmap))
     }
-}
-
-// This allows Pixmaps to be loaded as assets from the file system or cache.
-impl Asset for PackedSpritesPixmap {
-    type Loader = PackedSpritesPixmapLoader;
-
-    const EXTENSION: &'static str = "png";
 }
 
 /// Extension trait for tiny_skia::Pixmap.
@@ -212,10 +204,12 @@ struct TinySkiaSpriteMapMeta {
 }
 
 /// Allows a TinySkiaSpriteMapMeta to be loaded using the asset system.
-impl Asset for TinySkiaSpriteMapMeta {
-    type Loader = assets::RonLoader;
+impl FileAsset for TinySkiaSpriteMapMeta {
+    const EXTENSIONS: &'static [&'static str] = &["ron"];
 
-    const EXTENSION: &'static str = "ron";
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Result<Self, BoxedError> {
+        ron::de::from_bytes(bytes.as_ref()).map_err(Into::into)
+    }
 }
 
 /// A set of sprites that are unpacked from a larger sprite map image.
@@ -994,4 +988,67 @@ pub fn export_docknodes(
     pixmap
         .save_png(output_path)
         .map_err(|e| format!("Failed to save output image: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::assets::FileAsset;
+
+    #[test]
+    fn tiny_skia_sprite_meta_invalid_ron_is_err() {
+        let bytes = Cow::from(b"not: ron".as_slice());
+        let result = <TinySkiaSpriteMapMeta as FileAsset>::from_bytes(bytes);
+        assert!(
+            result.is_err(),
+            "expected invalid RON input to return an error"
+        );
+    }
+
+    #[test]
+    fn tiny_skia_sprite_meta_valid_ron_parses() {
+        let ron = r#"
+            (
+                texture_width: 16,
+                texture_height: 32,
+                sprites_meta: [
+                    (
+                        id: "compass",
+                        x: 0,
+                        y: 1,
+                        width: 8,
+                        height: 8,
+                    ),
+                ],
+            )
+        "#;
+        let bytes = Cow::from(ron.as_bytes());
+        let meta = <TinySkiaSpriteMapMeta as FileAsset>::from_bytes(bytes)
+            .expect("valid RON payload should deserialize");
+        assert_eq!(meta.texture_width, 16);
+        assert_eq!(meta.texture_height, 32);
+        assert_eq!(meta.sprites_meta.len(), 1);
+        let sprite_meta = &meta.sprites_meta[0];
+        assert_eq!(sprite_meta.id, "compass");
+        assert_eq!(sprite_meta.x, 0);
+        assert_eq!(sprite_meta.y, 1);
+        assert_eq!(sprite_meta.width, 8);
+        assert_eq!(sprite_meta.height, 8);
+    }
+
+    #[test]
+    fn packed_sprites_pixmap_rejects_non_png() {
+        let bytes = Cow::from(b"\x00\x01\x02 not a png".as_slice());
+        let err = <PackedSpritesPixmap as FileAsset>::from_bytes(bytes)
+            .expect_err("malformed PNG input should yield an error");
+        let io_err = err
+            .downcast::<io::Error>()
+            .expect("error should downcast to io::Error");
+        assert_eq!(io_err.kind(), io::ErrorKind::InvalidData);
+        let message = io_err.to_string();
+        assert!(
+            message.contains("Failed to decode PNG"),
+            "expected contextual message, got: {message}"
+        );
+    }
 }
