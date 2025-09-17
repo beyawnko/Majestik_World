@@ -1,9 +1,9 @@
-# Majesik: World
+# Majestik: World
 
 [![CI](https://github.com/beyawnko/Majestik_World/actions/workflows/ci.yml/badge.svg)](https://github.com/beyawnko/Majestik_World/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
-Majesik: World is an evolving rebrand of the open-source multiplayer voxel RPG
+Majestik: World is an evolving rebrand of the open-source multiplayer voxel RPG
 derived from Veloren.
 The project is transitioning toward a new identity and feature set;
 this README holds placeholders while the game takes shape.
@@ -81,4 +81,4 @@ Assets may carry additional licenses noted in their respective directories.
 ---
 
 _This repository is a work in progress and will change frequently as
-Majesik: World develops its identity._
+Majestik: World develops its identity._
