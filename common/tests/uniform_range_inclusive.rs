@@ -1,6 +1,6 @@
 // common/tests/uniform_range_inclusive.rs
 use rand::{
-    Rng, SeedableRng,
+    SeedableRng,
     distr::{Distribution, Uniform},
 };
 use rand_chacha::{ChaCha8Rng, ChaCha20Rng};
@@ -15,7 +15,9 @@ const CHI_SQUARE_THRESHOLD: f64 = 20.0; // Shared cutoff for all chi-square chec
 fn uniform_range_samples_are_inclusive_0_1() {
     const SEED: [u8; 32] = [0u8; 32]; // Chosen for determinism; covers bound cases with inclusive dist
     let mut rng = ChaCha8Rng::from_seed(SEED);
-    let dist = Uniform::new_inclusive(0.0f64, 1.0f64).expect("valid range");
+    let dist = Uniform::new_inclusive(0.0f64, 1.0f64).unwrap_or_else(|error| {
+        unreachable!("inclusive unit interval rejected: {error}");
+    });
     // Keep CI fast by default; opt-in longer runs with LONG_TESTS env var.
     const DEFAULT_ITERS: usize = 1_000;
     let iters: usize = if std::env::var("LONG_TESTS").is_ok() {
@@ -24,7 +26,7 @@ fn uniform_range_samples_are_inclusive_0_1() {
         DEFAULT_ITERS
     };
     for _ in 0..iters {
-        let v: f64 = rng.sample(dist);
+        let v: f64 = dist.sample(&mut rng);
         assert!((0.0..=1.0).contains(&v), "v={} out of [0,1]", v);
     }
 }
@@ -32,12 +34,14 @@ fn uniform_range_samples_are_inclusive_0_1() {
 #[test]
 fn uniform_inclusive_integer_range_bounds() {
     let mut rng = ChaCha8Rng::from_seed([1u8; 32]);
-    let dist = Uniform::new_inclusive(0u32, 10u32).expect("valid range");
+    let dist = Uniform::new_inclusive(0u32, 10u32).unwrap_or_else(|error| {
+        unreachable!("inclusive integer range rejected: {error}");
+    });
     let mut min_seen = u32::MAX;
     let mut max_seen = u32::MIN;
     const ITERATIONS: usize = 10_000; // good coverage with reasonable runtime
     for _ in 0..ITERATIONS {
-        let v = rng.sample(dist);
+        let v = dist.sample(&mut rng);
         assert!((0..=10).contains(&v));
         min_seen = min_seen.min(v);
         max_seen = max_seen.max(v);
@@ -49,21 +53,15 @@ fn uniform_inclusive_integer_range_bounds() {
 
 #[test]
 fn chi_square_uniform_multiple_seeds() {
-    use rand::{
-        SeedableRng,
-        distr::{Distribution, Uniform},
-        rngs::StdRng,
-    };
-
     let seeds: &[u64] = &[1337, 2025, 987654321];
     let bins = 10usize;
     let draws = 10_000usize;
-    let Ok(dist) = Uniform::new_inclusive(0.0_f64, 1.0_f64) else {
-        unreachable!("inclusive unit interval should be valid");
-    };
+    let dist = Uniform::new_inclusive(0.0_f64, 1.0_f64).unwrap_or_else(|error| {
+        unreachable!("inclusive unit interval rejected: {error}");
+    });
 
     for &seed in seeds {
-        let mut rng = StdRng::seed_from_u64(seed);
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let mut hist = vec![0usize; bins];
         for _ in 0..draws {
             let x: f64 = dist.sample(&mut rng);
@@ -96,9 +94,9 @@ fn chi_square_uniform_multiple_seeds() {
 fn uniform_range_chi_square_is_reasonable() {
     // Deterministic stream to keep test stable in CI.
     let mut rng = ChaCha20Rng::from_seed([1u8; 32]);
-    let Ok(dist) = Uniform::new_inclusive(0.0f64, 1.0) else {
-        unreachable!("inclusive unit interval should be valid");
-    };
+    let dist = Uniform::new_inclusive(0.0f64, 1.0).unwrap_or_else(|error| {
+        unreachable!("inclusive unit interval rejected: {error}");
+    });
 
     const BINS: usize = 10;
     const N: usize = 50_000;
@@ -141,9 +139,11 @@ fn uniform_very_small_float_range_bounds() {
     let mut rng = ChaCha8Rng::from_seed([2u8; 32]);
     let a = 0.1234_f64;
     let b = a + 1e-12;
-    let dist = Uniform::new_inclusive(a, b).expect("valid range");
+    let dist = Uniform::new_inclusive(a, b).unwrap_or_else(|error| {
+        unreachable!("inclusive micro-range rejected: {error}");
+    });
     for _ in 0..1_000 {
-        let v: f64 = rng.sample(dist);
+        let v: f64 = dist.sample(&mut rng);
         assert!((a..=b).contains(&v), "v={} not in [{}, {}]", v, a, b);
     }
 }

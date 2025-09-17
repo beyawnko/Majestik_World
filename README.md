@@ -33,7 +33,8 @@ If you hit dependency issues, try updating crates or file an issue with details.
 
 This repository also tracks large binary assets with [Git LFS](https://git-lfs.com/).
 Ensure typical system dependencies for Rust development (e.g., a C compiler
-and `pkg-config`) are installed.
+and `pkg-config`) are installed. Linux builds also require the ALSA headers
+(`libasound2-dev`) for audio backends.
 
 ```bash
 # Install Git LFS hooks for this repository

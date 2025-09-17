@@ -9,7 +9,7 @@ name: CI
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -49,7 +49,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('rust-toolchain.toml', '.tool-versions') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
       - name: Install rust components
@@ -65,11 +65,28 @@ jobs:
         if: ${{ matrix.features == '' || matrix.features == null }}
         run: |
           set -euo pipefail
-          cargo clippy --workspace --all-targets -- -D warnings
-          cargo clippy --workspace --all-targets --no-default-features --features be-dyn-lib -- -D warnings
-          cargo clippy --workspace --all-targets --no-default-features --features use-dyn-lib -- -D warnings \
+          cargo clippy \
+            --workspace \
+            --all-targets \
+            -- -D warnings
+          cargo clippy \
+            --workspace \
+            --all-targets \
+            --no-default-features \
+            --features be-dyn-lib \
+            -- -D warnings
+          cargo clippy \
+            --workspace \
+            --all-targets \
+            --no-default-features \
+            --features use-dyn-lib \
+            -- -D warnings \
             || echo "Warning: use-dyn-lib clippy check failed (known missing COMPUTE_FN in VolumeKey)"
-          cargo clippy --workspace --all-targets --features airship_maps -- -D warnings \
+          cargo clippy \
+            --workspace \
+            --all-targets \
+            --features airship_maps \
+            -- -D warnings \
             || echo "Warning: airship_maps clippy check failed (known outstanding diagnostics)"
           cargo check -p veloren-common --all-features --locked
         timeout-minutes: 25
