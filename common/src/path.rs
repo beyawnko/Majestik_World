@@ -1354,7 +1354,8 @@ pub fn point_on_prolate_spheroid(
     // Uniform distribution
     // Use inclusive bounds for uniform spheroid point sampling to ensure
     // proper coverage at the poles (θ=0, π) and complete azimuthal rotation (φ=0,
-    // 2π).
+    // 2π). The inclusive range guarantees exact 1.0 samples remain valid, which
+    // keeps downstream statistical checks from masking distribution issues.
     let range = Uniform::new_inclusive(0.0, 1.0).expect("valid inclusive range");
 
     // Midpoint is used as the local origin
