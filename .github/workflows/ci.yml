@@ -66,7 +66,7 @@ jobs:
           else
             cargo clippy --workspace --all-targets ${{ matrix.features }} -- -D warnings
           fi
-        timeout-minutes: 5
+        timeout-minutes: 15
 
       - name: Cache advisory DB
         uses: actions/cache@v4
@@ -81,14 +81,20 @@ jobs:
 
       - name: Cargo Deny (fetch with retry, then check)
         run: |
+          success=false
           for i in 1 2 3; do
             if cargo deny fetch; then
+              success=true
               break
             else
               echo "Attempt $i failed, retrying in $((i * 5)) seconds..."
               sleep $((i * 5))
             fi
           done
+          if [ "$success" = false ]; then
+            echo "cargo deny fetch failed after retries" >&2
+            exit 1
+          fi
           cargo deny check
         timeout-minutes: 5
 
