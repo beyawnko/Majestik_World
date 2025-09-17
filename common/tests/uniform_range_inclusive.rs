@@ -4,7 +4,7 @@ use rand::{
     distr::{Distribution, Uniform},
 };
 use rand_chacha::{ChaCha8Rng, ChaCha20Rng};
-use std::env;
+use std::{env, sync::OnceLock};
 
 // Chi-square critical values for df = 9 (10 bins - 1): 95% ≈ 16.92, 97.5% ≈
 // 19.02, 99% ≈ 21.67. Default to 20.0 near the 97.5% quantile to reduce
@@ -12,11 +12,22 @@ use std::env;
 // environments.
 const CRITICAL_95_DF9: f64 = 16.92;
 
+static CHI_SQUARE_THRESHOLD_CACHED: OnceLock<f64> = OnceLock::new();
+
 fn chi_square_threshold() -> f64 {
-    env::var("CRITICAL_X2_DF9")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(20.0)
+    *CHI_SQUARE_THRESHOLD_CACHED.get_or_init(|| {
+        let threshold = env::var("CRITICAL_X2_DF9")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20.0);
+        if threshold <= 0.0 || threshold > 100.0 {
+            panic!(
+                "Invalid CRITICAL_X2_DF9 value: {}. Must be positive and reasonable.",
+                threshold
+            );
+        }
+        threshold
+    })
 }
 
 #[test]

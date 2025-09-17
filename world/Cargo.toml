@@ -24,7 +24,7 @@ bin_compression = [
 cli = ["clap", "signal-hook", "indicatif"]
 # The airship_maps asset pipeline is mutually exclusive with some defaults in all-features CI;
 # cargo-all-features metadata excludes these to avoid invalid combinations during matrix runs.
-airship_maps = ["dep:tiny-skia"]
+airship_maps = ["dep:tiny-skia", "dep:png"]
 
 default = ["simd"]
 
@@ -66,6 +66,7 @@ fixed = "1"
 strum = { workspace = true }
 delaunator = "1.0.2"
 tiny-skia = { version = "0.11.4", optional = true }
+png = { version = "0.17.16", optional = true }
 
 # compression benchmarks
 lz-fear = { version = "0.2", optional = true }

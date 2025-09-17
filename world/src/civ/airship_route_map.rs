@@ -48,8 +48,20 @@ impl FileAsset for PackedSpritesPixmap {
 
     fn from_bytes(bytes: Cow<[u8]>) -> Result<Self, BoxedError> {
         let pixmap = Pixmap::decode_png(bytes.as_ref()).map_err(|e| {
-            let msg = format!("Failed to decode PNG: {}", e);
-            let classified = io::Error::new(io::ErrorKind::InvalidData, msg);
+            #[derive(Debug)]
+            struct PngError(png::DecodingError);
+
+            impl std::fmt::Display for PngError {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    write!(f, "Failed to decode PNG: {}", self.0)
+                }
+            }
+
+            impl std::error::Error for PngError {
+                fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(&self.0) }
+            }
+
+            let classified = io::Error::new(io::ErrorKind::InvalidData, PngError(e));
             Box::new(classified) as BoxedError
         })?;
         Ok(PackedSpritesPixmap(pixmap))
