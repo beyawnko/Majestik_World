@@ -1357,8 +1357,12 @@ pub fn point_on_prolate_spheroid(
     // 2π).
     // The bounds are compile-time constants that satisfy 0.0 <= 1.0, so this
     // constructor should remain infallible unless the API contract changes.
-    let range = Uniform::new_inclusive(0.0, 1.0)
-        .expect("inclusive unit interval must remain valid for spheroid sampling");
+    let range = match Uniform::new_inclusive(0.0, 1.0) {
+        Ok(range) => range,
+        Err(error) => {
+            unreachable!("inclusive unit interval must remain valid for spheroid sampling: {error}")
+        },
+    };
 
     // Midpoint is used as the local origin
     let midpoint = 0.5 * (focus1 + focus2);
