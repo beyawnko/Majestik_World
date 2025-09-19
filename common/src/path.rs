@@ -1355,11 +1355,10 @@ pub fn point_on_prolate_spheroid(
     // Use inclusive bounds for uniform spheroid point sampling to ensure
     // proper coverage at the poles (θ=0, π) and complete azimuthal rotation (φ=0,
     // 2π).
-    let range = Uniform::new_inclusive(0.0, 1.0).unwrap_or_else(|error| {
-        // The inclusive bounds are compile-time constants that satisfy 0.0 <= 1.0,
-        // so the constructor cannot fail unless the API contract changes.
-        unreachable!("inclusive unit interval rejected: {error}");
-    });
+    // The bounds are compile-time constants that satisfy 0.0 <= 1.0, so this
+    // constructor should remain infallible unless the API contract changes.
+    let range = Uniform::new_inclusive(0.0, 1.0)
+        .expect("inclusive unit interval must remain valid for spheroid sampling");
 
     // Midpoint is used as the local origin
     let midpoint = 0.5 * (focus1 + focus2);
