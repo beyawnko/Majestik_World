@@ -86,8 +86,10 @@ jobs:
         timeout-minutes: 2
 
       - name: Install cargo-deny
-        run: cargo install --locked cargo-deny
-        timeout-minutes: 5
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+        timeout-minutes: 2
 
       - name: Cargo Deny (fetch with retry, then check)
         run: |
