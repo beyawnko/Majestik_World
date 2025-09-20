@@ -2,14 +2,15 @@ name: CI
 
 on:
   push:
-    branches: ["**"]
+    branches: [main]
+    tags: ["v*.*.*"]
   pull_request:
 
 jobs:
-  build:
+  build-test-lint:
     name: build-test-lint (${{ matrix.os }} / ${{ matrix.rust }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -17,26 +18,52 @@ jobs:
         rust: [stable]
     steps:
       - uses: actions/checkout@v4
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - name: Cache cargo registry and git
+      - name: Cache cargo registry, git, and target
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            target
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Lint
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
         timeout-minutes: 15
       - name: Build
         run: cargo build --workspace --release --locked
       - name: Test
         run: cargo test --workspace --release --locked
+
+  feature-check:
+    name: feature check (ubuntu / ${{ matrix.features }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - features: default
+            cmd: cargo check --workspace --locked
+          - features: be-dyn-lib
+            cmd: cargo check --workspace --locked --no-default-features --features be-dyn-lib
+          - features: airship_maps
+            cmd: cargo check --workspace --locked --features airship_maps
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check (${{ matrix.features }})
+        run: ${{ matrix.cmd }}
 
   deny:
     name: cargo-deny
@@ -50,12 +77,12 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
-      - name: Run cargo-deny checks
-        run: |
-          cargo deny check licenses
-          cargo deny check bans
-          cargo deny check advisories
-          cargo deny check sources
+          fallback: none
+        timeout-minutes: 2
+      - name: cargo-deny check (advisories, bans, licenses, sources)
+        run: cargo deny check --all-features
+        env:
+          CARGO_TERM_COLOR: always
 
   actionlint:
     runs-on: ubuntu-latest
