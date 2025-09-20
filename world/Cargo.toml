@@ -22,9 +22,17 @@ bin_compression = [
     "cli",
 ]
 cli = ["clap", "signal-hook", "indicatif"]
+# The airship_maps asset pipeline is mutually exclusive with some defaults in all-features CI;
+# cargo-all-features metadata excludes these to avoid invalid combinations during matrix runs.
 airship_maps = ["dep:tiny-skia"]
 
 default = ["simd"]
+
+[package.metadata.cargo-all-features]
+# Skip mutually exclusive features when building with --all-features
+# Also skip 'airship_maps' because it pulls in tiny-skia/assets and does not compose with the
+# dynamic-lib flags; CI covers it via a dedicated matrix entry instead of --all-features.
+skip = ["be-dyn-lib", "use-dyn-lib", "airship_maps"]
 
 [dependencies]
 common = { package = "veloren-common", path = "../common" }

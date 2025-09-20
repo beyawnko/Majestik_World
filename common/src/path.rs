@@ -1352,8 +1352,17 @@ pub fn point_on_prolate_spheroid(
 ) -> Vec3<f32> {
     let mut rng = rng();
     // Uniform distribution
-    // `0.0 < 1.0` so constructing the distribution cannot fail.
-    let range = Uniform::new(0.0, 1.0).expect("valid range");
+    // Use inclusive bounds for uniform spheroid point sampling to ensure
+    // proper coverage at the poles (θ=0, π) and complete azimuthal rotation (φ=0,
+    // 2π).
+    // The bounds are compile-time constants that satisfy 0.0 <= 1.0, so this
+    // constructor should remain infallible unless the API contract changes.
+    let range = match Uniform::new_inclusive(0.0, 1.0) {
+        Ok(range) => range,
+        Err(error) => {
+            unreachable!("inclusive unit interval must remain valid for spheroid sampling: {error}")
+        },
+    };
 
     // Midpoint is used as the local origin
     let midpoint = 0.5 * (focus1 + focus2);

@@ -9,14 +9,29 @@ name: CI
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - ""
+          - "--no-default-features --features be-dyn-lib"
+          - "--no-default-features --features use-dyn-lib"
+          - "--features airship_maps"
     steps:
       - uses: actions/checkout@v4
+        timeout-minutes: 5
         with:
           submodules: true
           lfs: true
-      - uses: rust-lang/setup-rust@v1
+      - name: Install system dependencies (ALSA, udev)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
+        timeout-minutes: 5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        timeout-minutes: 10
         with:
-          rust-version: nightly-2025-09-14
+          toolchain: nightly-2025-09-14
+          override: true
       - name: Install Git LFS and verify assets
         run: |
           git lfs install --local
@@ -27,6 +42,7 @@ jobs:
           if [ -s .lfs-assets-id ]; then
             diff .lfs-assets-id .lfs-assets-id-pulled
           fi
+        timeout-minutes: 10
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -34,14 +50,64 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
+        timeout-minutes: 5
       - name: Install rust components
         run: rustup component add rustfmt clippy
+        timeout-minutes: 5
       - name: Format
         run: cargo fmt --all -- --check
-      - name: Lint
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        timeout-minutes: 5
+      - name: Clippy
+        run: |
+          set -euo pipefail
+          if [ -z "${{ matrix.features }}" ]; then
+            cargo clippy \
+              --workspace \
+              --all-targets \
+              -- -D warnings
+          else
+            cargo clippy \
+              --workspace \
+              --all-targets \
+              ${{ matrix.features }} \
+              -- -D warnings
+          fi
+          cargo check -p veloren-common --all-features --locked
+        timeout-minutes: 25
+
+      - name: Cache advisory DB
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/advisory-dbs
+          key: ${{ runner.os }}-advisorydb-${{ hashFiles('deny.toml') }}
+        timeout-minutes: 2
+
+      - name: Cargo Deny (fetch with retry, then check)
+        run: |
+          for i in 1 2 3; do cargo deny fetch && break || sleep 5; done
+          cargo deny check
+        timeout-minutes: 5
+
       - name: Test
-        run: cargo test --workspace --all-features
+        run: |
+          if [ -z "${{ matrix.features }}" ]; then
+            # Do not use --all-features here; the matrix enumerates valid feature sets
+            # and some flags are mutually exclusive. Combining them would fail builds.
+            cargo test --workspace --locked
+          else
+            cargo test --workspace ${{ matrix.features }} --locked
+          fi
+        timeout-minutes: 20
+
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: reviewdog/action-actionlint@v1 # validate workflow syntax
+        with:
+          fail_on_error: true
+          reporter: github-check
