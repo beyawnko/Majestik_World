@@ -65,7 +65,7 @@ fn chi_square_uniform_multiple_seeds() {
         let mut hist = vec![0usize; bins];
         for _ in 0..draws {
             let x: f64 = dist.sample(&mut rng);
-            let idx = ((x * bins as f64).floor() as isize).clamp(0, (bins as isize) - 1) as usize;
+            let idx = ((x * bins as f64).floor() as usize).min(bins - 1);
             hist[idx] += 1;
         }
 
