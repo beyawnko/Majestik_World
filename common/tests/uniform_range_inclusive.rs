@@ -69,6 +69,10 @@ fn chi_square_uniform_multiple_seeds() {
                 x >= 0.0,
                 "uniform [0, 1] sample must be non-negative before binning, got {x}"
             );
+            debug_assert!(
+                x <= 1.0,
+                "uniform [0, 1] sample must be within [0, 1], got {x}"
+            );
             let idx = ((x * bins as f64).floor() as usize).min(bins - 1);
             hist[idx] += 1;
         }
