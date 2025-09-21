@@ -3971,6 +3971,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "58093314a45e00c77d5c508f76e77c3396afbbc0d01506e7fae47b018bac2b1d"
 
 [[package]]
+name = "majestic-world-core"
+version = "0.1.0"
+dependencies = [
+ "approx 0.5.1",
+ "specs",
+ "vek 0.17.1",
+ "veloren-common",
+ "veloren-common-state",
+]
+
+[[package]]
+name = "majestic-world-ffi"
+version = "0.1.0"
+dependencies = [
+ "majestic-world-core",
+]
+
+[[package]]
 name = "malloc_buf"
 version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

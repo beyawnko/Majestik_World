@@ -54,6 +54,7 @@
 - **Authoritative state snapshots** (`common/state/src/state.rs`): provide C ABI functions to fetch serialized ECS component data (player stats, inventories, terrain deltas) for UE replication.
 - **Player/account data** (`common/src/character.rs`, `common/src/resources.rs`, `common/src/trade.rs`): define FFI structs mirroring UE `USTRUCT` wrappers so gameplay ability systems can consume them.
 - **World terrain data** (`common/src/terrain`, `world/src/land.rs`, `world/src/block.rs`): translate voxel/chunk data into UE Landscape heightmaps or ProceduralMesh data, with Nanite-ready mesh baking.
+  - The Phase 1 core crate now snapshots chunk-level terrain diffs each tick and exposes them via `mw_core_last_terrain_diff_take`, delivering sorted chunk coordinates through FFI-managed buffers ready for UE consumption.
 - **Network messages** (`network/protocol/src/message.rs`, `network/protocol/src/types.rs`): map to UE replicated RPCs and NetSerialize functions, preserving compression/prioritization schemes.
 - **Save/Load**: keep Rust serialization (RON/bincode) but expose hooks so UE save games trigger Rust persistence and receive file handles/metadata.
 
