@@ -15,16 +15,20 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        rust: [stable]
+        rust: [nightly-2025-09-14]
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
+        timeout-minutes: 5
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        timeout-minutes: 10
         with:
-          components: clippy, rustfmt
+          toolchain: nightly-2025-09-14
+          override: true
+          components: rustfmt, clippy
       - name: Cache cargo registry, git, and target
         uses: actions/cache@v4
         with:
@@ -32,7 +36,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          # Append the rust-toolchain hash only when the file exists to avoid needless cache churn on forks.
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}${{ hashFiles('rust-toolchain.toml') != '' && format('-{0}', hashFiles('rust-toolchain.toml')) || '' }}
           restore-keys: |
             ${{ runner.os }}-cargo-
       - name: Format check
@@ -63,9 +68,18 @@ jobs:
             cmd: cargo check --workspace --locked --no-default-features --features use-dyn-lib
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
+        timeout-minutes: 5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        timeout-minutes: 10
+        with:
+          toolchain: nightly-2025-09-14
+          override: true
       - name: Check (${{ matrix.features }})
         run: ${{ matrix.cmd }}
+        timeout-minutes: 10
 
   deny:
     name: cargo-deny
@@ -74,7 +88,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        timeout-minutes: 5
+        with:
+          toolchain: nightly-2025-09-14
+          override: true
       - name: Cache advisory database
         uses: actions/cache@v4
         with:
@@ -86,7 +104,6 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
-          fallback: none
         timeout-minutes: 2
       - name: cargo-deny check (advisories, bans, licenses, sources)
         run: cargo deny check --all-features
