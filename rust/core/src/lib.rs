@@ -4,7 +4,7 @@
 //! `docs/ue5_plugin_migration_plan.md`, extracting a deterministic simulation
 //! interface that can be linked from external runtimes.
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, fmt, sync::Arc, time::Duration};
 
 use specs::{World, world::WorldExt};
 use veloren_common::{
@@ -14,7 +14,7 @@ use veloren_common::{
 use veloren_common_state::{State, TerrainChanges};
 
 /// Integer grid coordinate describing a terrain chunk.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TerrainChunkCoord {
     /// Chunk coordinate along the X axis.
     pub x: i32,
@@ -43,11 +43,10 @@ impl TerrainDiff {
         fn collect_chunks<'a>(
             iter: impl Iterator<Item = &'a vek::Vec2<i32>>,
         ) -> Vec<TerrainChunkCoord> {
-            let mut coords: Vec<_> = iter
-                .map(|pos| TerrainChunkCoord::new(pos.x, pos.y))
-                .collect();
-            coords.sort_unstable_by(|lhs, rhs| lhs.x.cmp(&rhs.x).then_with(|| lhs.y.cmp(&rhs.y)));
-            coords
+            iter.map(|pos| TerrainChunkCoord::new(pos.x, pos.y))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect()
         }
 
         Self {
@@ -207,6 +206,11 @@ impl MajestikCore {
     pub fn program_time_seconds(&self) -> f64 { self.state.ecs().read_resource::<ProgramTime>().0 }
 
     /// Provide shared access to the underlying ECS world for read-only queries.
+    ///
+    /// # Safety
+    /// The `visitor` closure must not store references to any world data beyond
+    /// the scope of this call. Doing so would allow use-after-free when the
+    /// `World` is next mutated by the simulation.
     pub fn visit_world<R>(&self, visitor: impl FnOnce(&World) -> R) -> R {
         visitor(self.state.ecs())
     }

@@ -4,11 +4,13 @@
 //! `UE5_PLUGIN_MASTER_PLAN.md` Phase 2 and `docs/ue5_plugin_migration_plan.md`
 //! §7, enabling Unreal Engine prototypes to call into the Rust simulation.
 
-use std::time::Duration;
+use std::{ffi::c_void, time::Duration};
 
 use majestic_world_core::{
     CoreInitConfig, GameMode, MajestikCore, TerrainChunkCoord, TerrainDiff, TickConfig,
 };
+
+const MAX_DELTA_TIME_SECONDS: f32 = 10.0;
 
 /// Result codes returned by the FFI surface.
 #[repr(i32)]
@@ -19,6 +21,7 @@ pub enum MwResult {
     InvalidMapSize = 2,
     InvalidDayCycle = 3,
     InvalidDeltaTime = 4,
+    InvalidGameMode = 5,
     InternalError = 255,
 }
 
@@ -43,22 +46,35 @@ pub enum MwGameMode {
     Singleplayer = 2,
 }
 
-impl From<MwGameMode> for GameMode {
-    fn from(mode: MwGameMode) -> Self {
-        match mode {
-            MwGameMode::Server => GameMode::Server,
-            MwGameMode::Client => GameMode::Client,
-            MwGameMode::Singleplayer => GameMode::Singleplayer,
-        }
-    }
-}
-
 impl From<GameMode> for MwGameMode {
     fn from(mode: GameMode) -> Self {
         match mode {
             GameMode::Server => MwGameMode::Server,
             GameMode::Client => MwGameMode::Client,
             GameMode::Singleplayer => MwGameMode::Singleplayer,
+        }
+    }
+}
+
+impl TryFrom<i32> for MwGameMode {
+    type Error = ();
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            x if x == MwGameMode::Server as i32 => Ok(MwGameMode::Server),
+            x if x == MwGameMode::Client as i32 => Ok(MwGameMode::Client),
+            x if x == MwGameMode::Singleplayer as i32 => Ok(MwGameMode::Singleplayer),
+            _ => Err(()),
+        }
+    }
+}
+
+impl From<MwGameMode> for GameMode {
+    fn from(mode: MwGameMode) -> Self {
+        match mode {
+            MwGameMode::Server => GameMode::Server,
+            MwGameMode::Client => GameMode::Client,
+            MwGameMode::Singleplayer => GameMode::Singleplayer,
         }
     }
 }
@@ -71,7 +87,10 @@ pub struct MwCoreConfig {
     pub map_size_lg_y: u32,
     pub sea_level: i32,
     pub day_cycle_coefficient: f64,
-    pub game_mode: MwGameMode,
+    /// Integer representation of [`MwGameMode`]. Values outside the declared
+    /// discriminants cause [`mw_core_create`] to return
+    /// [`MwResult::InvalidGameMode`].
+    pub game_mode: i32,
 }
 
 impl Default for MwCoreConfig {
@@ -81,20 +100,25 @@ impl Default for MwCoreConfig {
             map_size_lg_y: 1,
             sea_level: 0,
             day_cycle_coefficient: 1.0,
-            game_mode: MwGameMode::Server,
+            game_mode: MwGameMode::Server as i32,
         }
     }
 }
 
 impl MwCoreConfig {
-    fn into_core_config(self) -> CoreInitConfig {
-        CoreInitConfig::from_components(
+    fn try_game_mode(self) -> Result<MwGameMode, MwResult> {
+        MwGameMode::try_from(self.game_mode).map_err(|_| MwResult::InvalidGameMode)
+    }
+
+    fn try_into_core_config(self) -> Result<CoreInitConfig, MwResult> {
+        let game_mode = self.try_game_mode()?;
+        Ok(CoreInitConfig::from_components(
             self.map_size_lg_x,
             self.map_size_lg_y,
             self.sea_level,
             self.day_cycle_coefficient,
-            self.game_mode.into(),
-        )
+            game_mode.into(),
+        ))
     }
 }
 
@@ -115,11 +139,19 @@ impl From<TerrainChunkCoord> for MwTerrainChunkCoord {
     }
 }
 
+/// Buffer returned from terrain diff queries.
+///
+/// The buffer exposes a borrowed slice of chunk coordinates. Ownership of the
+/// allocation remains with the Rust side and must be released via
+/// [`mw_terrain_chunk_buffer_free`] when the caller is finished processing the
+/// data. The `owner` field is reserved for the allocator and must be treated as
+/// opaque by foreign callers.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MwTerrainChunkBuffer {
     pub ptr: *mut MwTerrainChunkCoord,
     pub len: usize,
+    owner: *mut c_void,
 }
 
 impl MwTerrainChunkBuffer {
@@ -128,13 +160,14 @@ impl MwTerrainChunkBuffer {
             Self {
                 ptr: std::ptr::null_mut(),
                 len: 0,
+                owner: std::ptr::null_mut(),
             }
         } else {
-            let len = coords.len();
-            let mut boxed = coords.into_boxed_slice();
-            let ptr = boxed.as_mut_ptr();
-            std::mem::forget(boxed);
-            Self { ptr, len }
+            let mut boxed_vec = Box::new(coords);
+            let ptr = boxed_vec.as_mut_ptr();
+            let len = boxed_vec.len();
+            let owner = Box::into_raw(boxed_vec) as *mut c_void;
+            Self { ptr, len, owner }
         }
     }
 }
@@ -180,7 +213,7 @@ pub unsafe extern "C" fn mw_core_config_default(out_config: *mut MwCoreConfig) -
 ///
 /// # Safety
 /// `config` and `out_state` must be null or point to valid memory owned by the
-/// caller.
+/// caller. Passing a null `config` pointer is allowed and uses default values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mw_core_create(
     config: *const MwCoreConfig,
@@ -188,9 +221,12 @@ pub unsafe extern "C" fn mw_core_create(
 ) -> MwResult {
     let cfg = unsafe { config.as_ref() }.copied().unwrap_or_default();
 
-    match MajestikCore::new(cfg.into_core_config()) {
-        Ok(core) => write_out_ptr(out_state, Box::new(MwState { inner: core })),
-        Err(err) => err.into(),
+    match cfg.try_into_core_config() {
+        Ok(core_cfg) => match MajestikCore::new(core_cfg) {
+            Ok(core) => write_out_ptr(out_state, Box::new(MwState { inner: core })),
+            Err(err) => err.into(),
+        },
+        Err(err) => err,
     }
 }
 
@@ -222,6 +258,9 @@ fn with_state<R>(state: *const MwState, f: impl FnOnce(&MajestikCore) -> R) -> R
 
 /// Advance the simulation by `dt_seconds` seconds.
 ///
+/// `dt_seconds` must be finite, non-negative, and no greater than
+/// [`MAX_DELTA_TIME_SECONDS`].
+///
 /// # Safety
 /// `state` must be a pointer previously returned by [`mw_core_create`].
 #[unsafe(no_mangle)]
@@ -230,7 +269,7 @@ pub unsafe extern "C" fn mw_core_tick(
     dt_seconds: f32,
     update_terrain: MwBool,
 ) -> MwResult {
-    if !dt_seconds.is_finite() || dt_seconds < 0.0 {
+    if !dt_seconds.is_finite() || dt_seconds < 0.0 || dt_seconds > MAX_DELTA_TIME_SECONDS {
         return MwResult::InvalidDeltaTime;
     }
 
@@ -332,7 +371,8 @@ pub unsafe extern "C" fn mw_core_game_mode(
 /// # Safety
 /// `state` and `out_diff` must be valid pointers. The caller is responsible for
 /// releasing buffers contained in `MwTerrainDiff` via
-/// [`mw_terrain_chunk_buffer_free`].
+/// [`mw_terrain_chunk_buffer_free`] before mutating or destroying the returned
+/// state handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mw_core_last_terrain_diff_take(
     state: *mut MwState,
@@ -360,14 +400,16 @@ pub unsafe extern "C" fn mw_core_last_terrain_diff_take(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mw_terrain_chunk_buffer_free(buffer: *mut MwTerrainChunkBuffer) {
     if let Some(buf) = unsafe { buffer.as_mut() } {
-        if !buf.ptr.is_null() && buf.len > 0 {
-            // SAFETY: The pointer/length pair was produced by `from_vec`, so
-            // it is safe to reconstruct the boxed slice.
-            let slice = std::ptr::slice_from_raw_parts_mut(buf.ptr, buf.len);
-            drop(unsafe { Box::from_raw(slice) });
+        if !buf.owner.is_null() {
+            // SAFETY: `owner` was created from `Box<Vec<_>>` in
+            // `MwTerrainChunkBuffer::from_vec`, making this reconstruction
+            // sound as long as we only do it once.
+            let owner = buf.owner as *mut Vec<MwTerrainChunkCoord>;
+            drop(unsafe { Box::from_raw(owner) });
         }
         buf.ptr = std::ptr::null_mut();
         buf.len = 0;
+        buf.owner = std::ptr::null_mut();
     }
 }
 
@@ -407,6 +449,10 @@ mod tests {
         );
         assert_eq!(
             unsafe { mw_core_tick(handle, f32::NAN, 0) },
+            MwResult::InvalidDeltaTime
+        );
+        assert_eq!(
+            unsafe { mw_core_tick(handle, MAX_DELTA_TIME_SECONDS + 1.0, 0) },
             MwResult::InvalidDeltaTime
         );
         unsafe { mw_core_destroy(handle) };
@@ -455,10 +501,44 @@ mod tests {
                 ffi_diff.modified_chunks.len,
             );
             assert_eq!(modified_chunks, &[MwTerrainChunkCoord { x: -4, y: 3 }],);
+            assert!(!ffi_diff.new_chunks.owner.is_null());
+            assert!(!ffi_diff.modified_chunks.owner.is_null());
+            assert!(ffi_diff.removed_chunks.owner.is_null());
 
             mw_terrain_chunk_buffer_free(&mut ffi_diff.new_chunks);
             mw_terrain_chunk_buffer_free(&mut ffi_diff.modified_chunks);
             mw_terrain_chunk_buffer_free(&mut ffi_diff.removed_chunks);
         }
+    }
+
+    #[test]
+    fn rejects_invalid_game_mode() {
+        let mut config = MwCoreConfig::default();
+        config.game_mode = 42;
+        let mut handle: *mut MwState = ptr::null_mut();
+        assert_eq!(
+            unsafe { mw_core_create(&config, &mut handle) },
+            MwResult::InvalidGameMode
+        );
+        assert!(handle.is_null());
+    }
+
+    #[test]
+    fn buffer_free_releases_owner_only_once() {
+        let mut buffer = MwTerrainChunkBuffer::from_vec(vec![MwTerrainChunkCoord { x: 1, y: 2 }]);
+        assert!(!buffer.ptr.is_null());
+        assert_eq!(buffer.len, 1);
+        assert!(!buffer.owner.is_null());
+
+        unsafe { mw_terrain_chunk_buffer_free(&mut buffer) };
+
+        assert!(buffer.ptr.is_null());
+        assert_eq!(buffer.len, 0);
+        assert!(buffer.owner.is_null());
+
+        // Double free should be a no-op thanks to the null owner guard.
+        unsafe { mw_terrain_chunk_buffer_free(&mut buffer) };
+        assert!(buffer.ptr.is_null());
+        assert!(buffer.owner.is_null());
     }
 }
