@@ -110,13 +110,17 @@ fn uniform_range_chi_square_is_reasonable() {
     const N: usize = 50_000;
     let mut counts = [0usize; BINS];
 
+    // Ensure the simplified truncation logic still routes the right edge into the
+    // final bin to avoid out-of-bounds indices when x == 1.0.
+    assert_eq!(
+        ((1.0_f64 * BINS as f64) as usize).min(BINS - 1),
+        BINS - 1,
+        "upper edge should map to the last histogram bin"
+    );
+
     for _ in 0..N {
         let x = dist.sample(&mut rng);
-        let idx = if x == 1.0 {
-            BINS - 1
-        } else {
-            (x * BINS as f64) as usize
-        };
+        let idx = ((x * BINS as f64) as usize).min(BINS - 1);
         counts[idx] += 1;
     }
 

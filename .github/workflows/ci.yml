@@ -32,7 +32,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
       - name: Format check
@@ -59,6 +59,8 @@ jobs:
             cmd: cargo check --workspace --locked --no-default-features --features be-dyn-lib
           - features: airship_maps
             cmd: cargo check --workspace --locked --features airship_maps
+          - features: use-dyn-lib
+            cmd: cargo check --workspace --locked --no-default-features --features use-dyn-lib
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -73,6 +75,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+      - name: Cache advisory database
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/advisory-dbs
+          key: ${{ runner.os }}-advisory-db-${{ hashFiles('deny.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-advisory-db-
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
         with:
