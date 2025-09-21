@@ -4,7 +4,7 @@
 //! `docs/ue5_plugin_migration_plan.md`, extracting a deterministic simulation
 //! interface that can be linked from external runtimes.
 
-use std::{collections::BTreeSet, fmt, sync::Arc, time::Duration};
+use std::{collections::HashSet, fmt, sync::Arc, time::Duration};
 
 use specs::{World, world::WorldExt};
 use veloren_common::{
@@ -14,7 +14,7 @@ use veloren_common::{
 use veloren_common_state::{State, TerrainChanges};
 
 /// Integer grid coordinate describing a terrain chunk.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TerrainChunkCoord {
     /// Chunk coordinate along the X axis.
     pub x: i32,
@@ -43,10 +43,18 @@ impl TerrainDiff {
         fn collect_chunks<'a>(
             iter: impl Iterator<Item = &'a vek::Vec2<i32>>,
         ) -> Vec<TerrainChunkCoord> {
-            iter.map(|pos| TerrainChunkCoord::new(pos.x, pos.y))
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect()
+            let mut seen = HashSet::new();
+            let mut coords = Vec::new();
+
+            for pos in iter {
+                let coord = TerrainChunkCoord::new(pos.x, pos.y);
+                if seen.insert(coord) {
+                    coords.push(coord);
+                }
+            }
+
+            coords.sort();
+            coords
         }
 
         Self {
@@ -210,8 +218,22 @@ impl MajestikCore {
     /// # Safety
     /// The `visitor` closure must not store references to any world data beyond
     /// the scope of this call. Doing so would allow use-after-free when the
-    /// `World` is next mutated by the simulation.
+    /// `World` is next mutated by the simulation. Prefer [`query_world_owned`]
+    /// when the result can be materialised as owned data.
     pub fn visit_world<R>(&self, visitor: impl FnOnce(&World) -> R) -> R {
+        visitor(self.state.ecs())
+    }
+
+    /// Run a read-only ECS query that must return owned data.
+    ///
+    /// By constraining the return type to `Send + 'static`, this helper
+    /// prevents callers from leaking references tied to the world outside
+    /// the closure, eliminating a common class of use-after-free bugs when
+    /// integrating with foreign runtimes.
+    pub fn query_world_owned<R>(&self, visitor: impl FnOnce(&World) -> R) -> R
+    where
+        R: Send + 'static,
+    {
         visitor(self.state.ecs())
     }
 
@@ -317,5 +339,25 @@ mod tests {
         let diff = core.take_last_terrain_diff();
         assert_eq!(diff.modified_chunks, vec![TerrainChunkCoord::new(7, -1)]);
         assert!(core.take_last_terrain_diff().is_empty());
+    }
+
+    #[test]
+    fn visit_world_provides_read_only_queries() {
+        let core = MajestikCore::new(CoreInitConfig::default()).expect("core initialises");
+        let time_from_visit = core.visit_world(|world| world.read_resource::<Time>().0);
+        assert_eq!(time_from_visit, core.time_seconds());
+    }
+
+    #[test]
+    fn query_world_owned_returns_owned_data() {
+        let core = MajestikCore::new(CoreInitConfig::default()).expect("core initialises");
+        let (time, program_time) = core.query_world_owned(|world| {
+            let time = world.read_resource::<Time>().0;
+            let program = world.read_resource::<ProgramTime>().0;
+            (time, program)
+        });
+
+        assert_eq!(time, core.time_seconds());
+        assert_eq!(program_time, core.program_time_seconds());
     }
 }

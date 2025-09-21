@@ -4,12 +4,23 @@
 //! `UE5_PLUGIN_MASTER_PLAN.md` Phase 2 and `docs/ue5_plugin_migration_plan.md`
 //! §7, enabling Unreal Engine prototypes to call into the Rust simulation.
 
-use std::{ffi::c_void, time::Duration};
+use std::{
+    collections::HashSet,
+    ffi::c_void,
+    sync::{Mutex, OnceLock},
+    time::Duration,
+};
 
 use majestic_world_core::{
     CoreInitConfig, GameMode, MajestikCore, TerrainChunkCoord, TerrainDiff, TickConfig,
 };
 
+/// Maximum timestep accepted by [`mw_core_tick`].
+///
+/// Clamping the delta time defends the core simulation against untrusted
+/// runtimes that might forward arbitrarily long pauses. Oversized timesteps can
+/// destabilise integration and invalidate assumptions made by downstream
+/// systems, so the limit is treated as a safety invariant on the FFI surface.
 const MAX_DELTA_TIME_SECONDS: f32 = 10.0;
 
 /// Result codes returned by the FFI surface.
@@ -139,6 +150,53 @@ impl From<TerrainChunkCoord> for MwTerrainChunkCoord {
     }
 }
 
+fn buffer_owner_registry() -> &'static Mutex<HashSet<usize>> {
+    static REGISTRY: OnceLock<Mutex<HashSet<usize>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn register_buffer_owner(owner: *mut c_void) -> bool {
+    if owner.is_null() {
+        return false;
+    }
+
+    let owner_addr = owner as usize;
+
+    match buffer_owner_registry().lock() {
+        Ok(mut guard) => {
+            guard.insert(owner_addr);
+            true
+        },
+        Err(_) => false,
+    }
+}
+
+fn take_buffer_owner(owner: *mut c_void) -> Option<*mut Vec<MwTerrainChunkCoord>> {
+    if owner.is_null() {
+        return None;
+    }
+
+    let owner_addr = owner as usize;
+
+    let removed = match buffer_owner_registry().lock() {
+        Ok(mut guard) => guard.remove(&owner_addr),
+        Err(_) => false,
+    };
+
+    if removed {
+        Some(owner as *mut Vec<MwTerrainChunkCoord>)
+    } else {
+        None
+    }
+}
+
+/// Maximum number of terrain chunk coordinates returned in a single buffer.
+///
+/// This guard prevents untrusted runtimes from forcing the allocator to
+/// reserve excessive memory when marshaling large diffs across the FFI
+/// boundary.
+const MAX_CHUNK_COORDS: usize = 65_536;
+
 /// Buffer returned from terrain diff queries.
 ///
 /// The buffer exposes a borrowed slice of chunk coordinates. Ownership of the
@@ -156,6 +214,10 @@ pub struct MwTerrainChunkBuffer {
 
 impl MwTerrainChunkBuffer {
     fn from_vec(coords: Vec<MwTerrainChunkCoord>) -> Self {
+        if coords.len() > MAX_CHUNK_COORDS {
+            return Self::default();
+        }
+
         if coords.is_empty() {
             Self {
                 ptr: std::ptr::null_mut(),
@@ -167,7 +229,20 @@ impl MwTerrainChunkBuffer {
             let ptr = boxed_vec.as_mut_ptr();
             let len = boxed_vec.len();
             let owner = Box::into_raw(boxed_vec) as *mut c_void;
-            Self { ptr, len, owner }
+            if register_buffer_owner(owner) {
+                Self { ptr, len, owner }
+            } else {
+                // SAFETY: `owner` originates from `Box::into_raw` above and has not
+                // been exposed elsewhere, making this reconstruction sound.
+                unsafe {
+                    drop(Box::from_raw(owner as *mut Vec<MwTerrainChunkCoord>));
+                }
+                Self {
+                    ptr: std::ptr::null_mut(),
+                    len: 0,
+                    owner: std::ptr::null_mut(),
+                }
+            }
         }
     }
 }
@@ -241,19 +316,18 @@ pub unsafe extern "C" fn mw_core_destroy(state: *mut MwState) {
     }
 }
 
-fn with_state_mut<R>(
-    state: *mut MwState,
-    f: impl FnOnce(&mut MajestikCore) -> R,
-) -> Result<R, MwResult> {
-    unsafe { state.as_mut() }
-        .map(|mw_state| Ok(f(&mut mw_state.inner)))
-        .unwrap_or_else(|| Err(MwResult::NullPointer))
+fn with_state_mut(state: *mut MwState, f: impl FnOnce(&mut MajestikCore) -> MwResult) -> MwResult {
+    match unsafe { state.as_mut() } {
+        Some(mw_state) => f(&mut mw_state.inner),
+        None => MwResult::NullPointer,
+    }
 }
 
-fn with_state<R>(state: *const MwState, f: impl FnOnce(&MajestikCore) -> R) -> Result<R, MwResult> {
-    unsafe { state.as_ref() }
-        .map(|mw_state| Ok(f(&mw_state.inner)))
-        .unwrap_or_else(|| Err(MwResult::NullPointer))
+fn with_state(state: *const MwState, f: impl FnOnce(&MajestikCore) -> MwResult) -> MwResult {
+    match unsafe { state.as_ref() } {
+        Some(mw_state) => f(&mw_state.inner),
+        None => MwResult::NullPointer,
+    }
 }
 
 /// Advance the simulation by `dt_seconds` seconds.
@@ -269,7 +343,10 @@ pub unsafe extern "C" fn mw_core_tick(
     dt_seconds: f32,
     update_terrain: MwBool,
 ) -> MwResult {
-    if !dt_seconds.is_finite() || dt_seconds < 0.0 || dt_seconds > MAX_DELTA_TIME_SECONDS {
+    if !dt_seconds.is_finite()
+        || dt_seconds.is_sign_negative()
+        || dt_seconds > MAX_DELTA_TIME_SECONDS
+    {
         return MwResult::InvalidDeltaTime;
     }
 
@@ -278,9 +355,8 @@ pub unsafe extern "C" fn mw_core_tick(
             update_terrain: update_terrain != 0,
         };
         core.tick(Duration::from_secs_f32(dt_seconds), config);
+        MwResult::Success
     })
-    .map(|_| MwResult::Success)
-    .unwrap_or_else(|err| err)
 }
 
 fn write_scalar<T: Copy>(out: *mut T, value: T) -> MwResult {
@@ -315,9 +391,7 @@ pub unsafe extern "C" fn mw_core_time_seconds(
     state: *const MwState,
     out_time: *mut f64,
 ) -> MwResult {
-    with_state(state, MajestikCore::time_seconds)
-        .map(|time| write_scalar(out_time, time))
-        .unwrap_or_else(|err| err)
+    with_state(state, |core| write_scalar(out_time, core.time_seconds()))
 }
 
 /// Query the accumulated program time in seconds.
@@ -330,9 +404,9 @@ pub unsafe extern "C" fn mw_core_program_time_seconds(
     state: *const MwState,
     out_time: *mut f64,
 ) -> MwResult {
-    with_state(state, MajestikCore::program_time_seconds)
-        .map(|time| write_scalar(out_time, time))
-        .unwrap_or_else(|err| err)
+    with_state(state, |core| {
+        write_scalar(out_time, core.program_time_seconds())
+    })
 }
 
 /// Query the accumulated in-game time-of-day in seconds.
@@ -345,9 +419,9 @@ pub unsafe extern "C" fn mw_core_time_of_day_seconds(
     state: *const MwState,
     out_time: *mut f64,
 ) -> MwResult {
-    with_state(state, MajestikCore::time_of_day_seconds)
-        .map(|time| write_scalar(out_time, time))
-        .unwrap_or_else(|err| err)
+    with_state(state, |core| {
+        write_scalar(out_time, core.time_of_day_seconds())
+    })
 }
 
 /// Fetch the [`MwGameMode`] currently running inside the state handle.
@@ -360,10 +434,10 @@ pub unsafe extern "C" fn mw_core_game_mode(
     state: *const MwState,
     out_mode: *mut MwGameMode,
 ) -> MwResult {
-    with_state(state, MajestikCore::game_mode)
-        .map(MwGameMode::from)
-        .map(|mode| write_scalar(out_mode, mode))
-        .unwrap_or_else(|err| err)
+    with_state(state, |core| {
+        let mode = MwGameMode::from(core.game_mode());
+        write_scalar(out_mode, mode)
+    })
 }
 
 /// Consume and return the terrain diff captured during the previous tick.
@@ -382,13 +456,11 @@ pub unsafe extern "C" fn mw_core_last_terrain_diff_take(
         return MwResult::NullPointer;
     }
 
-    with_state_mut(state, |core| core.take_last_terrain_diff())
-        .map(terrain_diff_into_mw)
-        .map(|diff| {
-            unsafe { *out_diff = diff };
-            MwResult::Success
-        })
-        .unwrap_or_else(|err| err)
+    with_state_mut(state, |core| {
+        let diff = terrain_diff_into_mw(core.take_last_terrain_diff());
+        unsafe { *out_diff = diff };
+        MwResult::Success
+    })
 }
 
 /// Release memory owned by a terrain chunk buffer previously returned from
@@ -400,12 +472,11 @@ pub unsafe extern "C" fn mw_core_last_terrain_diff_take(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mw_terrain_chunk_buffer_free(buffer: *mut MwTerrainChunkBuffer) {
     if let Some(buf) = unsafe { buffer.as_mut() } {
-        if !buf.owner.is_null() {
-            // SAFETY: `owner` was created from `Box<Vec<_>>` in
-            // `MwTerrainChunkBuffer::from_vec`, making this reconstruction
-            // sound as long as we only do it once.
-            let owner = buf.owner as *mut Vec<MwTerrainChunkCoord>;
-            drop(unsafe { Box::from_raw(owner) });
+        if let Some(owner) = take_buffer_owner(buf.owner) {
+            // SAFETY: `owner` was created from `Box::into_raw` in
+            // `MwTerrainChunkBuffer::from_vec` and removed from the registry
+            // above, guaranteeing this drop occurs at most once.
+            unsafe { drop(Box::from_raw(owner)) };
         }
         buf.ptr = std::ptr::null_mut();
         buf.len = 0;
@@ -452,9 +523,14 @@ mod tests {
             MwResult::InvalidDeltaTime
         );
         assert_eq!(
+            unsafe { mw_core_tick(handle, -0.0, 0) },
+            MwResult::InvalidDeltaTime
+        );
+        assert_eq!(
             unsafe { mw_core_tick(handle, MAX_DELTA_TIME_SECONDS + 1.0, 0) },
             MwResult::InvalidDeltaTime
         );
+        assert_eq!(unsafe { mw_core_tick(handle, 0.0, 0) }, MwResult::Success);
         unsafe { mw_core_destroy(handle) };
     }
 
@@ -512,6 +588,15 @@ mod tests {
     }
 
     #[test]
+    fn oversized_coordinate_vectors_are_rejected() {
+        let coords = vec![MwTerrainChunkCoord { x: 0, y: 0 }; MAX_CHUNK_COORDS + 1];
+        let buffer = MwTerrainChunkBuffer::from_vec(coords);
+        assert!(buffer.ptr.is_null());
+        assert_eq!(buffer.len, 0);
+        assert!(buffer.owner.is_null());
+    }
+
+    #[test]
     fn rejects_invalid_game_mode() {
         let mut config = MwCoreConfig::default();
         config.game_mode = 42;
@@ -539,6 +624,21 @@ mod tests {
         // Double free should be a no-op thanks to the null owner guard.
         unsafe { mw_terrain_chunk_buffer_free(&mut buffer) };
         assert!(buffer.ptr.is_null());
+        assert!(buffer.owner.is_null());
+    }
+
+    #[test]
+    fn buffer_free_handles_malformed_input() {
+        let mut buffer = MwTerrainChunkBuffer {
+            ptr: ptr::null_mut(),
+            len: 1,
+            owner: ptr::null_mut(),
+        };
+
+        unsafe { mw_terrain_chunk_buffer_free(&mut buffer) };
+
+        assert!(buffer.ptr.is_null());
+        assert_eq!(buffer.len, 0);
         assert!(buffer.owner.is_null());
     }
 }
