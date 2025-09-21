@@ -11,14 +11,16 @@ This master plan establishes the end-to-end roadmap for transforming the existin
 5. **Document and govern the migration** by updating SPECS.md, README.md, and AGENTS.md once the foundational architecture is validated.
 
 ## Guiding Principles
-- **Spec-first execution**: Reference SPECS.md, the existing `plan.md`, and future UE migration specs for every change.
+- **Spec-first execution**: Reference SPECS.md and future UE migration specs for every change. This plan supersedes the rendering-related sections of the existing `plan.md` while preserving its performance engineering insights for UE integration.
 - **Rust core as source of truth**: Simulation, world generation, and data registries remain Rust-driven and are exposed to UE via narrow, testable interfaces.
 - **UE-native presentation layer**: Rendering, input, audio, UI, and networking surfaces use Unreal frameworks (Nanite, Enhanced Input, AudioMixer, replication).
 - **Additive, testable integration**: Introduce abstraction traits and FFI surfaces incrementally; preserve current gameplay determinism during each phase.
 - **CI as contract**: Expand automated checks in lockstep with new build surfaces, preventing regressions across Rust crates and UE modules.
 
 ## Phased Roadmap
+*Note: This master plan provides the strategic overview. For detailed technical implementation, see [UE5 Plugin Migration Technical Plan](docs/ue5_plugin_migration_plan.md) which contains 7 detailed phases that implement the 6 strategic phases outlined below.*
 ### Phase 0 — Foundation & Governance
+- **GPL-3.0 Legal Review (CRITICAL)**: Conduct comprehensive GPL-3.0 compatibility analysis for UE plugin distribution, as copyleft requirements may fundamentally impact architecture decisions and Epic Marketplace eligibility; document findings and approvals before Phase 1 begins.
 - Ratify this UE5 Plugin Master Plan with stakeholders; designate owners for gameplay, UE integration, assets, and CI.
 - Freeze non-critical feature work in `voxygen` and other engine-facing crates while planning the migration.
 - Stand up a `ue5-migration` branch for documentation, prototypes, and tooling experiments that should not block ongoing Rust improvements.
@@ -29,7 +31,7 @@ This master plan establishes the end-to-end roadmap for transforming the existin
 - **Phase 1b – Rendering/data surface extraction (≈3 engineer-weeks)**: Isolate `wgpu` dependencies behind feature-gated adapters, consolidate gameplay and simulation crates into a `rust/core` workspace compiled as static libraries with `panic=abort`, and document all render-time data contracts.
 - **Phase 1c – Audio & platform shims (≈1 engineer-week)**: Replace `cpal`/platform APIs with trait-driven facades, proving parity through existing audio regression tests and ensuring no direct OS calls remain.
 - **Phase 1d – Serialization contract hardening (≈1 engineer-week)**: Define and snapshot serialization contracts for state snapshots, world chunks, player data, and asset tables, ensuring compatibility with Unreal data structures and capturing golden files for deterministic comparison.
-- **Exit gate**: Phase 1 concludes only when a determinism regression harness demonstrates identical tick outputs between the pre-refactor client and the abstracted `rust/core` workspace across two consecutive runs.
+- **Exit gate**: Phase 1 concludes only when a determinism regression harness demonstrates identical tick outputs between the pre-refactor client and the abstracted `rust/core` workspace across two consecutive runs using standardized test scenarios: (1) 100-tick world generation with fixed seed, (2) player movement and combat simulation, (3) weather and day/night cycle progression, with byte-for-byte output comparison and golden file validation.
 
 ### Phase 2 — FFI & Plugin Skeleton
 - Design the C ABI surface (init, tick, shutdown, event queues, data queries) using the FFI approach selected during the Phase 0 spike, then generate headers via `cbindgen` or UniFFI accordingly.

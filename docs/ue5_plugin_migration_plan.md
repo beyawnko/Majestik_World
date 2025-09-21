@@ -86,20 +86,23 @@
 
 ### 7.2 Build & Toolchain Integration
 - Use `cargo` to build `rust/core` crates into static libs (`.a`/`.lib`) per platform during CI, compiling with `-C panic=abort` to match UE expectations, and publish artifacts into `Plugins/MajestikWorld/ThirdParty/RustCore/<platform>`.
+- **Memory Safety Requirements**: Implement comprehensive error handling with Result types throughout FFI boundary, add panic hooks for graceful error handling, and establish validation harness using Valgrind/AddressSanitizer for memory leaks, double-free errors, and proper cleanup of Rust-allocated resources.
 - Generate C headers with `cbindgen` (or UniFFI if selected) and bundle them under `Source/MajestikWorldRust` for UE consumption, versioning them alongside the prebuilt libraries.
-- Configure `MajestikWorld.Build.cs` to select the correct prebuilt artifact per platform, failing fast with guidance if a platform-specific library is missing instead of invoking `cargo build` during UE compilation.
+- Configure `MajestikWorld.Build.cs` to select the correct prebuilt artifact per platform, **with hybrid approach: fail fast with guidance for CI/release builds when platform-specific library missing, but for development builds, invoke script that checks if Rust library is up-to-date and rebuilds if necessary to streamline local development workflow**.
 - Support Windows, Linux, and future console targets by extending CI pipelines and Unreal Build Tool (UBT) switches to copy the appropriate ThirdParty libraries and include directories into packaged plugins.
 
 ### 7.3 Runtime Ownership Model
 - UE `UGameInstanceSubsystem` (C++) owns a pointer to Rust `State` (`mw_state_handle`).
 - Each tick, subsystem calls `mw_state_tick(delta)`; the Rust core returns event bundles (entity spawns/despawns, component updates) processed by UE to drive visuals and replication.
-- Use UE `UActorComponent` wrappers to mirror ECS components that need blueprint access (e.g., health, equipment). Components subscribe to update streams from Rust via event queues shared through FFI ring buffers.
+- Use UE `UActorComponent` wrappers to mirror ECS components that need blueprint access (e.g., health, equipment). Components subscribe to update streams from Rust via **memory-safe message passing through serialized data or atomic operations with clear ownership semantics and documented synchronization primitives**.
+- **Synchronization Requirements**: Document specific memory ordering guarantees, implement proper atomic operations for cross-language data sharing, and establish clear ownership semantics to prevent data races.
 
 ### 7.4 Networking & Replication Plan
 - Retire Rust’s QUIC socket management; designate UE server authoritative using existing NetDriver for connection/auth.
+- **Performance and Security Requirements**: Establish specific performance benchmarks comparing QUIC vs UE NetDriver (latency, throughput, packet loss handling). Document security considerations including encryption parity, DDoS protection, and congestion control before committing to migration.
 - Rust networking crates degrade to deterministic state diff/compression utilities invoked by UE replication callbacks (e.g., `GetLifetimeReplicatedProps`).
 - Provide bridging layer translating `network/protocol` message structs into UE `FStruct`s, letting UE’s replication automatically deliver to clients while Rust handles simulation updates.
-- Benchmark UE NetDriver throughput and latency against the existing QUIC pipeline early in Phase 3 using representative workloads; treat any regression beyond agreed tolerances as a blocker for full migration.
+- Benchmark UE NetDriver throughput and latency against the existing QUIC pipeline early in Phase 3 using representative workloads and the defined metrics; treat any performance regression or missing security parity beyond agreed tolerances as a blocker for full migration.
 
 ### 7.5 Input, Audio, and UI Hooks
 - UE input actions produce normalized `InputFrame` data forwarded to Rust (per player) through FFI.
@@ -108,11 +111,13 @@
 
 ### 7.6 Asset & Animation Strategy
 - Convert Voxel/VOX assets into Nanite meshes during content cooking; maintain original data for deterministic physics/hitboxes in Rust.
+- **Asset Validation Pipeline**: Establish validation pipeline verifying converted assets maintain gameplay-critical properties (collision detection, physics calculations) and implement rollback mechanism for problematic conversions.
 - Use Veloren animation timelines as data-driven references to author UE Animation Sequences or Control Rig logic, storing mapping tables linking Rust animation state IDs to UE assets.
 - Keep localization tables by parsing `common/i18n` with Rust, then exporting to UE `Localization Dashboard` resources during build.
 
 ## 8. Workflow, Testing, and CI Expansion
 - **Rust CI (existing):** keep `cargo fmt`, `cargo clippy --all-targets`, `cargo test --all`. Run inside `rust/` workspace.
+- **Security Scanning:** Add automated security scanning tools for C/Rust FFI boundaries analyzing buffer overflows, null pointer dereferences, and improper memory management across language boundaries.
 - **UE Build Verification:** add GitHub Actions job using Unreal Automation Tool (UAT) or `RunUAT BuildPlugin` to compile the plugin against UE 5.6 headless build (Linux container).
 - **Binding Consistency Test:** add integration test crate that links against generated C headers and ensures ABI compatibility (e.g., using `ctest`).
 - **Simulation Regression Tests:** keep deterministic worldgen/save-game tests in Rust; use golden outputs to ensure parity before and after UE integration.
