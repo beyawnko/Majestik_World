@@ -15,12 +15,11 @@ use majestic_world_core::{
     CoreInitConfig, GameMode, MajestikCore, TerrainChunkCoord, TerrainDiff, TickConfig,
 };
 
-/// Maximum timestep accepted by [`mw_core_tick`].
-///
-/// Clamping the delta time defends the core simulation against untrusted
-/// runtimes that might forward arbitrarily long pauses. Oversized timesteps can
-/// destabilise integration and invalidate assumptions made by downstream
-/// systems, so the limit is treated as a safety invariant on the FFI surface.
+/// Upper bound on a single simulation step's duration to defend against stalls
+/// and untrusted runtimes forwarding arbitrarily long pauses. Values above this
+/// can destabilise integrators and overflow downstream systems; 10s is chosen
+/// as a conservative ceiling for recovery after hitches while preserving
+/// safety.
 const MAX_DELTA_TIME_SECONDS: f32 = 10.0;
 
 /// Result codes returned by the FFI surface.
@@ -33,6 +32,7 @@ pub enum MwResult {
     InvalidDayCycle = 3,
     InvalidDeltaTime = 4,
     InvalidGameMode = 5,
+    BufferTooLarge = 6,
     InternalError = 255,
 }
 
@@ -72,9 +72,9 @@ impl TryFrom<i32> for MwGameMode {
 
     fn try_from(value: i32) -> Result<Self, Self::Error> {
         match value {
-            x if x == MwGameMode::Server as i32 => Ok(MwGameMode::Server),
-            x if x == MwGameMode::Client as i32 => Ok(MwGameMode::Client),
-            x if x == MwGameMode::Singleplayer as i32 => Ok(MwGameMode::Singleplayer),
+            0 => Ok(Self::Server),
+            1 => Ok(Self::Client),
+            2 => Ok(Self::Singleplayer),
             _ => Err(()),
         }
     }
@@ -167,26 +167,24 @@ fn register_buffer_owner(owner: *mut c_void) -> bool {
             guard.insert(owner_addr);
             true
         },
-        Err(_) => false,
+        Err(poisoned) => {
+            let mut guard = poisoned.into_inner();
+            guard.insert(owner_addr);
+            true
+        },
     }
 }
 
-fn take_buffer_owner(owner: *mut c_void) -> Option<*mut Vec<MwTerrainChunkCoord>> {
+fn take_buffer_owner(owner: *mut c_void) -> bool {
     if owner.is_null() {
-        return None;
+        return false;
     }
 
     let owner_addr = owner as usize;
 
-    let removed = match buffer_owner_registry().lock() {
+    match buffer_owner_registry().lock() {
         Ok(mut guard) => guard.remove(&owner_addr),
-        Err(_) => false,
-    };
-
-    if removed {
-        Some(owner as *mut Vec<MwTerrainChunkCoord>)
-    } else {
-        None
+        Err(poisoned) => poisoned.into_inner().remove(&owner_addr),
     }
 }
 
@@ -343,10 +341,7 @@ pub unsafe extern "C" fn mw_core_tick(
     dt_seconds: f32,
     update_terrain: MwBool,
 ) -> MwResult {
-    if !dt_seconds.is_finite()
-        || dt_seconds.is_sign_negative()
-        || dt_seconds > MAX_DELTA_TIME_SECONDS
-    {
+    if !dt_seconds.is_finite() || !(0.0..=MAX_DELTA_TIME_SECONDS).contains(&dt_seconds) {
         return MwResult::InvalidDeltaTime;
     }
 
@@ -457,8 +452,16 @@ pub unsafe extern "C" fn mw_core_last_terrain_diff_take(
     }
 
     with_state_mut(state, |core| {
-        let diff = terrain_diff_into_mw(core.take_last_terrain_diff());
-        unsafe { *out_diff = diff };
+        let diff = core.take_last_terrain_diff();
+        if diff.new_chunks.len() > MAX_CHUNK_COORDS
+            || diff.modified_chunks.len() > MAX_CHUNK_COORDS
+            || diff.removed_chunks.len() > MAX_CHUNK_COORDS
+        {
+            return MwResult::BufferTooLarge;
+        }
+
+        let ffi_diff = terrain_diff_into_mw(diff);
+        unsafe { core::ptr::write(out_diff, ffi_diff) };
         MwResult::Success
     })
 }
@@ -472,12 +475,24 @@ pub unsafe extern "C" fn mw_core_last_terrain_diff_take(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mw_terrain_chunk_buffer_free(buffer: *mut MwTerrainChunkBuffer) {
     if let Some(buf) = unsafe { buffer.as_mut() } {
-        if let Some(owner) = take_buffer_owner(buf.owner) {
-            // SAFETY: `owner` was created from `Box::into_raw` in
-            // `MwTerrainChunkBuffer::from_vec` and removed from the registry
-            // above, guaranteeing this drop occurs at most once.
+        let ptr_is_null = buf.ptr.is_null();
+
+        if (ptr_is_null && buf.len != 0) || (!ptr_is_null && buf.len == 0) {
+            return;
+        }
+
+        if buf.owner.is_null() {
+            return;
+        }
+
+        if take_buffer_owner(buf.owner) {
+            let owner = buf.owner as *mut Vec<MwTerrainChunkCoord>;
+            // SAFETY: `owner` originates from `Box::into_raw` in
+            // `MwTerrainChunkBuffer::from_vec` and has been removed from the
+            // registry above, guaranteeing this drop occurs at most once.
             unsafe { drop(Box::from_raw(owner)) };
         }
+
         buf.ptr = std::ptr::null_mut();
         buf.len = 0;
         buf.owner = std::ptr::null_mut();
@@ -487,17 +502,27 @@ pub unsafe extern "C" fn mw_terrain_chunk_buffer_free(buffer: *mut MwTerrainChun
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ptr;
+    use std::{
+        convert::TryFrom,
+        ffi::c_void,
+        ptr,
+        sync::{Arc, Barrier},
+        thread,
+    };
 
-    #[test]
-    fn create_tick_and_destroy_round_trip() {
+    fn create_state() -> *mut MwState {
         let mut handle: *mut MwState = ptr::null_mut();
-        let config = MwCoreConfig::default();
         assert_eq!(
-            unsafe { mw_core_create(&config, &mut handle) },
+            unsafe { mw_core_create(ptr::null(), &mut handle) },
             MwResult::Success
         );
         assert!(!handle.is_null());
+        handle
+    }
+
+    #[test]
+    fn create_tick_and_destroy_round_trip() {
+        let handle = create_state();
 
         assert_eq!(unsafe { mw_core_tick(handle, 0.016, 0) }, MwResult::Success);
 
@@ -513,17 +538,14 @@ mod tests {
 
     #[test]
     fn rejects_invalid_delta_time() {
-        let mut handle: *mut MwState = ptr::null_mut();
-        assert_eq!(
-            unsafe { mw_core_create(ptr::null(), &mut handle) },
-            MwResult::Success
-        );
+        let handle = create_state();
+
         assert_eq!(
             unsafe { mw_core_tick(handle, f32::NAN, 0) },
             MwResult::InvalidDeltaTime
         );
         assert_eq!(
-            unsafe { mw_core_tick(handle, -0.0, 0) },
+            unsafe { mw_core_tick(handle, -0.1, 0) },
             MwResult::InvalidDeltaTime
         );
         assert_eq!(
@@ -531,16 +553,37 @@ mod tests {
             MwResult::InvalidDeltaTime
         );
         assert_eq!(unsafe { mw_core_tick(handle, 0.0, 0) }, MwResult::Success);
+
+        unsafe { mw_core_destroy(handle) };
+    }
+
+    #[test]
+    fn accepts_negative_zero_dt() {
+        let handle = create_state();
+
+        assert_eq!(
+            unsafe { mw_core_tick(handle, -0.0, MwBool::from(true)) },
+            MwResult::Success
+        );
+
+        unsafe { mw_core_destroy(handle) };
+    }
+
+    #[test]
+    fn rejects_oversize_dt() {
+        let handle = create_state();
+
+        assert_eq!(
+            unsafe { mw_core_tick(handle, MAX_DELTA_TIME_SECONDS + 0.001, 0) },
+            MwResult::InvalidDeltaTime
+        );
+
         unsafe { mw_core_destroy(handle) };
     }
 
     #[test]
     fn terrain_diff_take_returns_empty_by_default() {
-        let mut handle: *mut MwState = ptr::null_mut();
-        assert_eq!(
-            unsafe { mw_core_create(ptr::null(), &mut handle) },
-            MwResult::Success
-        );
+        let handle = create_state();
 
         let mut diff = MwTerrainDiff::default();
         assert_eq!(
@@ -559,6 +602,32 @@ mod tests {
     }
 
     #[test]
+    fn terrain_diff_take_returns_error_for_oversize_buffers() {
+        let handle = create_state();
+        let oversize = TerrainDiff {
+            new_chunks: vec![TerrainChunkCoord::new(0, 0); MAX_CHUNK_COORDS + 1],
+            modified_chunks: Vec::new(),
+            removed_chunks: Vec::new(),
+        };
+
+        assert_eq!(
+            with_state_mut(handle, move |core| {
+                core.inject_last_terrain_diff_for_test(oversize);
+                MwResult::Success
+            }),
+            MwResult::Success
+        );
+
+        let mut diff = MwTerrainDiff::default();
+        assert_eq!(
+            unsafe { mw_core_last_terrain_diff_take(handle, &mut diff) },
+            MwResult::BufferTooLarge
+        );
+
+        unsafe { mw_core_destroy(handle) };
+    }
+
+    #[test]
     fn terrain_diff_conversion_allocates_buffers() {
         let diff = TerrainDiff {
             new_chunks: vec![TerrainChunkCoord::new(1, 2)],
@@ -570,13 +639,13 @@ mod tests {
         unsafe {
             let new_chunks =
                 std::slice::from_raw_parts(ffi_diff.new_chunks.ptr, ffi_diff.new_chunks.len);
-            assert_eq!(new_chunks, &[MwTerrainChunkCoord { x: 1, y: 2 }],);
+            assert_eq!(new_chunks, &[MwTerrainChunkCoord { x: 1, y: 2 }]);
 
             let modified_chunks = std::slice::from_raw_parts(
                 ffi_diff.modified_chunks.ptr,
                 ffi_diff.modified_chunks.len,
             );
-            assert_eq!(modified_chunks, &[MwTerrainChunkCoord { x: -4, y: 3 }],);
+            assert_eq!(modified_chunks, &[MwTerrainChunkCoord { x: -4, y: 3 }]);
             assert!(!ffi_diff.new_chunks.owner.is_null());
             assert!(!ffi_diff.modified_chunks.owner.is_null());
             assert!(ffi_diff.removed_chunks.owner.is_null());
@@ -598,8 +667,10 @@ mod tests {
 
     #[test]
     fn rejects_invalid_game_mode() {
-        let mut config = MwCoreConfig::default();
-        config.game_mode = 42;
+        let config = MwCoreConfig {
+            game_mode: 42,
+            ..Default::default()
+        };
         let mut handle: *mut MwState = ptr::null_mut();
         assert_eq!(
             unsafe { mw_core_create(&config, &mut handle) },
@@ -621,14 +692,14 @@ mod tests {
         assert_eq!(buffer.len, 0);
         assert!(buffer.owner.is_null());
 
-        // Double free should be a no-op thanks to the null owner guard.
         unsafe { mw_terrain_chunk_buffer_free(&mut buffer) };
         assert!(buffer.ptr.is_null());
+        assert_eq!(buffer.len, 0);
         assert!(buffer.owner.is_null());
     }
 
     #[test]
-    fn buffer_free_handles_malformed_input() {
+    fn buffer_free_rejects_malformed_and_is_idempotent() {
         let mut buffer = MwTerrainChunkBuffer {
             ptr: ptr::null_mut(),
             len: 1,
@@ -638,7 +709,43 @@ mod tests {
         unsafe { mw_terrain_chunk_buffer_free(&mut buffer) };
 
         assert!(buffer.ptr.is_null());
-        assert_eq!(buffer.len, 0);
+        assert_eq!(buffer.len, 1);
         assert!(buffer.owner.is_null());
+
+        unsafe { mw_terrain_chunk_buffer_free(&mut buffer) };
+        assert!(buffer.ptr.is_null());
+        assert_eq!(buffer.len, 1);
+        assert!(buffer.owner.is_null());
+    }
+
+    #[test]
+    fn take_buffer_owner_recovers_from_poison() {
+        let owner = Box::into_raw(Box::new(Vec::<MwTerrainChunkCoord>::new())) as *mut c_void;
+        assert!(register_buffer_owner(owner));
+
+        let barrier = Arc::new(Barrier::new(2));
+        let waiter = barrier.clone();
+        let handle = thread::spawn(move || {
+            let _guard = buffer_owner_registry().lock().unwrap();
+            waiter.wait();
+            panic!("poison");
+        });
+
+        barrier.wait();
+        let _ = handle.join();
+
+        assert!(take_buffer_owner(owner));
+
+        unsafe {
+            drop(Box::from_raw(owner as *mut Vec<MwTerrainChunkCoord>));
+        }
+    }
+
+    #[test]
+    fn game_mode_discriminant_validation() {
+        assert!(MwGameMode::try_from(0).is_ok());
+        assert!(MwGameMode::try_from(1).is_ok());
+        assert!(MwGameMode::try_from(2).is_ok());
+        assert!(MwGameMode::try_from(42).is_err());
     }
 }

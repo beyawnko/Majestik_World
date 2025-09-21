@@ -39,6 +39,10 @@ pub struct TerrainDiff {
 }
 
 impl TerrainDiff {
+    /// Build a diff from the provided terrain change sets, deduplicating chunk
+    /// coordinates and returning them in a deterministic sorted order. This
+    /// guarantees the FFI surface never reports duplicate entries while
+    /// incurring an `O(n log n)` sort for large updates.
     fn from_terrain_changes(changes: &TerrainChanges) -> Self {
         fn collect_chunks<'a>(
             iter: impl Iterator<Item = &'a vek::Vec2<i32>>,
@@ -220,6 +224,10 @@ impl MajestikCore {
     /// the scope of this call. Doing so would allow use-after-free when the
     /// `World` is next mutated by the simulation. Prefer [`query_world_owned`]
     /// when the result can be materialised as owned data.
+    #[deprecated(
+        note = "Use query_world_owned to return owned data and avoid leaking references across \
+                FFI boundaries"
+    )]
     pub fn visit_world<R>(&self, visitor: impl FnOnce(&World) -> R) -> R {
         visitor(self.state.ecs())
     }
@@ -251,6 +259,14 @@ impl MajestikCore {
     /// Take the previously captured terrain diff, resetting the internal cache.
     pub fn take_last_terrain_diff(&mut self) -> TerrainDiff {
         std::mem::take(&mut self.last_terrain_diff)
+    }
+}
+
+#[cfg(feature = "ffi-test-hooks")]
+impl MajestikCore {
+    /// Inject a preconstructed terrain diff for test instrumentation.
+    pub fn inject_last_terrain_diff_for_test(&mut self, diff: TerrainDiff) {
+        self.last_terrain_diff = diff;
     }
 }
 
@@ -342,6 +358,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn visit_world_provides_read_only_queries() {
         let core = MajestikCore::new(CoreInitConfig::default()).expect("core initialises");
         let time_from_visit = core.visit_world(|world| world.read_resource::<Time>().0);
