@@ -27,6 +27,13 @@
 | Networking transport | `network` uses `quinn` QUIC + tokio runtime | Bridge to UE replication (UDP) via C++ shim calling Rust protocol/state. |
 | Platform integrations | Discord SDK, native dialogs, winit-specific clipboard | Replace with UE OnlineSubsystem / platform APIs.
 
+### 2.3 Hybrid integration candidates
+| Area | Crates/Paths | Hybrid Approach |
+| --- | --- | --- |
+| Networking protocol bridging | `network/protocol`, `network/common`, `network/transport` | Keep message serialization, prioritization, and compression in Rust; expose UE-friendly structs while UE NetDriver owns socket lifecycle and bandwidth management. |
+| Server orchestration hooks | `server/src`, `server-cli`, `server/agent` | Preserve quest, AI, and rules logic in Rust while delegating matchmaking/session bootstrap to UE subsystems; provide async callbacks for UE-hosted servers. |
+| Data ingestion pipelines | `common/assets`, `common/i18n`, `assets/` | Continue authoring and validating data in Rust, but surface UE DataAssets through generated manifests and hot-load hooks maintained on the UE side. |
+
 ## 3. Rust Dependencies Requiring UE Replacement
 | Subsystem | Key Crates | Unreal Replacement Strategy |
 | --- | --- | --- |
@@ -78,10 +85,10 @@
 ```
 
 ### 7.2 Build & Toolchain Integration
-- Use `cargo` to build `rust/core` crates into static libs (`.a`/`.lib`) per platform; compile with `-C panic=abort` to match UE expectations.
-- Generate C headers with `cbindgen` (or `uniffi` if more ergonomic) and include them in `Source/MajestikWorldRust` for UE consumption.
-- Author `MajestikWorld.Build.cs` to detect Rust toolchain, invoke `cargo build --target` via pre-build step, and link outputs using `PublicAdditionalLibraries`.
-- Support Windows, Linux, and future console targets by configuring per-target cargo `config.toml` and UBT platform switches.
+- Use `cargo` to build `rust/core` crates into static libs (`.a`/`.lib`) per platform during CI, compiling with `-C panic=abort` to match UE expectations, and publish artifacts into `Plugins/MajestikWorld/ThirdParty/RustCore/<platform>`.
+- Generate C headers with `cbindgen` (or UniFFI if selected) and bundle them under `Source/MajestikWorldRust` for UE consumption, versioning them alongside the prebuilt libraries.
+- Configure `MajestikWorld.Build.cs` to select the correct prebuilt artifact per platform, failing fast with guidance if a platform-specific library is missing instead of invoking `cargo build` during UE compilation.
+- Support Windows, Linux, and future console targets by extending CI pipelines and Unreal Build Tool (UBT) switches to copy the appropriate ThirdParty libraries and include directories into packaged plugins.
 
 ### 7.3 Runtime Ownership Model
 - UE `UGameInstanceSubsystem` (C++) owns a pointer to Rust `State` (`mw_state_handle`).
@@ -92,6 +99,7 @@
 - Retire Rust’s QUIC socket management; designate UE server authoritative using existing NetDriver for connection/auth.
 - Rust networking crates degrade to deterministic state diff/compression utilities invoked by UE replication callbacks (e.g., `GetLifetimeReplicatedProps`).
 - Provide bridging layer translating `network/protocol` message structs into UE `FStruct`s, letting UE’s replication automatically deliver to clients while Rust handles simulation updates.
+- Benchmark UE NetDriver throughput and latency against the existing QUIC pipeline early in Phase 3 using representative workloads; treat any regression beyond agreed tolerances as a blocker for full migration.
 
 ### 7.5 Input, Audio, and UI Hooks
 - UE input actions produce normalized `InputFrame` data forwarded to Rust (per player) through FFI.
@@ -136,8 +144,8 @@
    - Update documentation (`SPECS.md`, `README.md`, `AGENTS.md`) with new plugin workflow and guardrails.
 
 ## 10. Immediate Next Actions
-- Approve this roadmap and create the `ue5-migration` branch dedicated to planning and tooling without blocking active Rust development.
-- Kick off dependency audit PRs that mark wgpu/winit/cpal usage sites for removal or abstraction.
-- Prototype `rust/core` static library exposing `mw_state_init/tick/shutdown` and validate linking from a minimal UE module via C API.
-- Begin asset pipeline research for VOX → Nanite conversion (e.g., MagicaVoxel → FBX/GLTF → UE Nanite) while preserving collision data for Rust physics.
-- Schedule documentation updates once the base FFI layer and plugin skeleton stabilize (per instructions for `SPECS.md`, `README.md`, `AGENTS.md`).
+1. **Roadmap approval & ownership** — Approve this roadmap and create the `ue5-migration` branch dedicated to planning and tooling without blocking active Rust development. *Success criteria*: decision log entry with named engineering, content, and operations leads plus branch provisioning.
+2. **Dependency audit execution** — Kick off dependency audit PRs that mark `wgpu`/`winit`/`cpal` usage sites for removal or abstraction. *Success criteria*: merged audit document enumerating every call site with proposed abstraction patterns and effort estimates.
+3. **Rust core prototype** — Prototype a `rust/core` static library exposing `mw_state_init/tick/shutdown` and validate linking from a minimal UE (or C) harness via the selected FFI tooling. *Success criteria*: automated test harness producing deterministic tick snapshots stored under CI artifacts.
+4. **Asset pipeline experiment** — Begin asset pipeline research for VOX → Nanite conversion (e.g., MagicaVoxel → FBX/GLTF → UE Nanite) while preserving collision data for Rust physics. *Success criteria*: documented pipeline prototype with sample asset conversion and comparison screenshots/metrics.
+5. **Documentation scheduling** — Schedule documentation updates once the base FFI layer and plugin skeleton stabilize (per instructions for `SPECS.md`, `README.md`, `AGENTS.md`). *Success criteria*: shared checklist mapping each document update to a milestone and owner within the migration tracker.

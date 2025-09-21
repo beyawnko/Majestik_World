@@ -5,7 +5,7 @@ This master plan establishes the end-to-end roadmap for transforming the existin
 
 ## Strategic Objectives
 1. **Deliver a UE 5.6+ plugin** that exposes Majestik World's Rust gameplay, networking, and world simulation through Epic-sanctioned extension points.
-2. **Retain deterministic Rust systems** for non-UE-facing logic, exposing them via safe FFI bridges that follow Unreal plugin standards.
+2. **Retain deterministic Rust systems** for non-UE-facing logic, exposing them via safe FFI bridges that follow Unreal plugin standards and are backed by automated regression tests that verify identical simulation outputs pre- and post-UE integration.
 3. **Modernize assets and pipelines** (Nanite, Control Rig, MetaSound, UE localization) while preserving existing data tables, save formats, and player progression.
 4. **Institutionalize CI/CD coverage** for both Rust and Unreal build targets, ensuring plugin packaging, ABI validation, and content cooking are reproducible.
 5. **Document and govern the migration** by updating SPECS.md, README.md, and AGENTS.md once the foundational architecture is validated.
@@ -19,17 +19,20 @@ This master plan establishes the end-to-end roadmap for transforming the existin
 
 ## Phased Roadmap
 ### Phase 0 — Foundation & Governance
-- Ratify this PLAN.md with stakeholders; designate owners for gameplay, UE integration, assets, and CI.
+- Ratify this UE5 Plugin Master Plan with stakeholders; designate owners for gameplay, UE integration, assets, and CI.
 - Freeze non-critical feature work in `voxygen` and other engine-facing crates while planning the migration.
 - Stand up a `ue5-migration` branch for documentation, prototypes, and tooling experiments that should not block ongoing Rust improvements.
+- Schedule a technical spike comparing `cbindgen` and UniFFI, producing minimal Rust ⇄ UE prototypes that evaluate memory ownership, ergonomics, and build integration trade-offs ahead of Phase 2.
 
 ### Phase 1 — Core Extraction & Abstraction
-- Audit Rust crates (common, world, server, network) to eliminate direct dependencies on winit, wgpu, cpal, and platform APIs by introducing trait-based ports.
-- Consolidate reusable gameplay and simulation crates into a dedicated `rust/core` workspace compiled as static libraries with `panic=abort`.
-- Define serialization contracts for state snapshots, world chunks, player data, and asset tables, ensuring compatibility with Unreal data structures.
+- **Phase 1a – Input & windowing abstraction (≈2 engineer-weeks)**: Audit Rust crates (`common`, `client`, `voxygen`) and remove direct `winit` usage by introducing input/window traits exercised by the existing client as a reference implementation.
+- **Phase 1b – Rendering/data surface extraction (≈3 engineer-weeks)**: Isolate `wgpu` dependencies behind feature-gated adapters, consolidate gameplay and simulation crates into a `rust/core` workspace compiled as static libraries with `panic=abort`, and document all render-time data contracts.
+- **Phase 1c – Audio & platform shims (≈1 engineer-week)**: Replace `cpal`/platform APIs with trait-driven facades, proving parity through existing audio regression tests and ensuring no direct OS calls remain.
+- **Phase 1d – Serialization contract hardening (≈1 engineer-week)**: Define and snapshot serialization contracts for state snapshots, world chunks, player data, and asset tables, ensuring compatibility with Unreal data structures and capturing golden files for deterministic comparison.
+- **Exit gate**: Phase 1 concludes only when a determinism regression harness demonstrates identical tick outputs between the pre-refactor client and the abstracted `rust/core` workspace across two consecutive runs.
 
 ### Phase 2 — FFI & Plugin Skeleton
-- Design the C ABI surface (init, tick, shutdown, event queues, data queries) and generate headers via `cbindgen` or UniFFI.
+- Design the C ABI surface (init, tick, shutdown, event queues, data queries) using the FFI approach selected during the Phase 0 spike, then generate headers via `cbindgen` or UniFFI accordingly.
 - Scaffold the UE plugin directory (`Plugins/MajestikWorld/`) with module classes, build rules (`MajestikWorld.Build.cs`), and stub subsystems (GameInstance, Actor Components).
 - Prototype bidirectional messaging: UE input events converted to Rust-friendly structs; Rust event bundles consumed by UE gameplay actors.
 
@@ -51,7 +54,7 @@ This master plan establishes the end-to-end roadmap for transforming the existin
 - Define release criteria, packaging steps, and a rolling schedule for hotfixes and content updates post-migration.
 
 ## Cross-Cutting Workstreams
-- **Security & Compliance**: Review third-party crates and UE modules for licensing; ensure Epic Marketplace submission policies are met.
+- **Security & Compliance**: Assume initial distribution via the existing open-source channels; review GPL-3.0 compatibility and third-party crate licensing, and only escalate Epic Marketplace compliance once a productization decision is made.
 - **Performance Engineering**: Carry forward existing performance plan (`plan.md`) insights into UE (profiling hooks, GPU/CPU telemetry, scalability tiers).
 - **Developer Experience**: Provide reproducible Nix/flake or containerized toolchains for building Rust libraries and UE plugins locally.
 - **Community & Documentation**: Prepare contributor guides covering how to extend Rust systems, add UE assets, and test cross-language features.
@@ -64,10 +67,10 @@ This master plan establishes the end-to-end roadmap for transforming the existin
 - ✅ Sign-off from gameplay, engine, and operations leads confirming readiness for UE-centric development.
 
 ## Next Immediate Actions
-1. Circulate PLAN.md and `docs/ue5_plugin_migration_plan.md` for stakeholder review; assign owners per phase/workstream.
-2. Kick off dependency abstraction spikes to decouple Rust gameplay crates from winit/wgpu/cpal.
-3. Prototype the Rust static library build + `cbindgen` header generation to validate integration assumptions.
-4. Draft updates for SPECS.md/README.md/AGENTS.md outlining forthcoming workflow changes once prototypes succeed.
+1. **Stakeholder alignment** — Circulate `UE5_PLUGIN_MASTER_PLAN.md` and `docs/ue5_plugin_migration_plan.md` for review. *Success criteria*: sign-off recorded in the issue tracker with named owners for every phase/workstream.
+2. **Dependency abstraction spikes** — File and staff work items to decouple Rust gameplay crates from `winit`/`wgpu`/`cpal`. *Success criteria*: each dependency has a linked tracking issue with scope notes, estimates, and assigned engineers.
+3. **Rust static library prototype** — Produce a `rust/core` static library alongside generated headers using the selected FFI tooling, validated by a minimal UE or C harness that executes `mw_state_tick` and matches golden determinism snapshots. *Success criteria*: harness output checked into CI with pass/fail gating.
+4. **Documentation update plan** — Draft updates for SPECS.md/README.md/AGENTS.md outlining forthcoming workflow changes once prototypes succeed. *Success criteria*: merged documentation checklist that maps every artifact to an owner and milestone.
 
 ---
 *This master plan will be revisited after Phase 2 prototypes validate the Rust ⇄ UE integration strategy, at which point documentation updates and downstream tasks will be scheduled.*
