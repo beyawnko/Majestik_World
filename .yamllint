@@ -1,0 +1,10 @@
+extends: default
+
+ignore: |
+  .github/workflows/ci.yml
+
+rules:
+  line-length:
+    max: 140
+    allow-non-breakable-words: true
+    level: warning
