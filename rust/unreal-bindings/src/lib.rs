@@ -5,7 +5,7 @@
 //! §7, enabling Unreal Engine prototypes to call into the Rust simulation.
 
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     ffi::c_void,
     sync::{Mutex, OnceLock},
     time::Duration,
@@ -14,15 +14,22 @@ use std::{
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use std::sync::atomic::AtomicU64;
+
 use majestic_world_core::{
     CoreInitConfig, GameMode, MajestikCore, TerrainChunkCoord, TerrainDiff, TickConfig,
 };
 
 /// Upper bound on per-tick delta time accepted by the FFI.
 ///
-/// Chosen to bound CPU/GPU work and deny denial-of-service attempts via
-/// arbitrarily long pauses while still allowing hitch recovery. Larger values
-/// risk destabilising integrators or overflowing downstream systems.
+/// UE5 may hand the simulation arbitrarily long pauses after hitch recovery or
+/// background suspends. Clamping to ten seconds bounds the amount of work a
+/// single tick can demand, prevents denial-of-service attempts that forward
+/// unbounded pauses, and keeps physics/integrator stability within the ranges
+/// validated in `UE5_PLUGIN_MASTER_PLAN.md`. Exceeding this window risks
+/// destabilising downstream systems or overflowing time accumulators, so the
+/// runtime returns [`MwResult::InvalidDeltaTime`] instead of advancing the
+/// simulation.
 const MAX_DELTA_TIME_SECONDS: f32 = 10.0;
 
 /// Result codes returned by the FFI surface.
@@ -60,18 +67,6 @@ pub enum MwGameMode {
     Singleplayer = 2,
 }
 
-impl MwGameMode {
-    #[inline]
-    fn try_from_i32(raw: i32) -> Option<Self> {
-        match raw {
-            0 => Some(Self::Server),
-            1 => Some(Self::Client),
-            2 => Some(Self::Singleplayer),
-            _ => None,
-        }
-    }
-}
-
 impl From<GameMode> for MwGameMode {
     fn from(mode: GameMode) -> Self {
         match mode {
@@ -86,7 +81,12 @@ impl TryFrom<i32> for MwGameMode {
     type Error = ();
 
     fn try_from(value: i32) -> Result<Self, Self::Error> {
-        MwGameMode::try_from_i32(value).ok_or(())
+        match value {
+            0 => Ok(Self::Server),
+            1 => Ok(Self::Client),
+            2 => Ok(Self::Singleplayer),
+            _ => Err(()),
+        }
     }
 }
 
@@ -128,7 +128,7 @@ impl Default for MwCoreConfig {
 
 impl MwCoreConfig {
     fn try_game_mode(self) -> Result<MwGameMode, MwResult> {
-        MwGameMode::try_from_i32(self.game_mode).ok_or(MwResult::InternalError)
+        MwGameMode::try_from(self.game_mode).map_err(|_| MwResult::InternalError)
     }
 
     fn try_into_core_config(self) -> Result<CoreInitConfig, MwResult> {
@@ -160,10 +160,12 @@ impl From<TerrainChunkCoord> for MwTerrainChunkCoord {
     }
 }
 
-fn buffer_owner_registry() -> &'static Mutex<HashSet<usize>> {
-    static REGISTRY: OnceLock<Mutex<HashSet<usize>>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(HashSet::new()))
+fn buffer_owner_registry() -> &'static Mutex<HashMap<u64, usize>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<u64, usize>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
+
+static NEXT_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(test)]
 static FORCE_REGISTER_FAILURE: AtomicBool = AtomicBool::new(false);
@@ -180,7 +182,10 @@ fn log_registry_poison(operation: &'static str) {
     eprintln!("buffer owner registry mutex poisoned during {operation}; attempting recovery",);
 }
 
-fn with_registry_mut<R>(operation: &'static str, f: impl FnOnce(&mut HashSet<usize>) -> R) -> R {
+fn with_registry_mut<R>(
+    operation: &'static str,
+    f: impl FnOnce(&mut HashMap<u64, usize>) -> R,
+) -> R {
     match buffer_owner_registry().lock() {
         Ok(mut guard) => f(&mut guard),
         Err(poisoned) => {
@@ -191,7 +196,7 @@ fn with_registry_mut<R>(operation: &'static str, f: impl FnOnce(&mut HashSet<usi
     }
 }
 
-fn register_buffer_owner(owner: *mut c_void) -> Result<(), ()> {
+fn register_buffer_owner(owner: *mut c_void) -> Result<u64, ()> {
     if owner.is_null() {
         return Err(());
     }
@@ -201,25 +206,27 @@ fn register_buffer_owner(owner: *mut c_void) -> Result<(), ()> {
         return Err(());
     }
 
-    let owner_addr = owner as usize;
-
-    with_registry_mut("register", |registry| {
-        if registry.insert(owner_addr) {
-            Ok(())
-        } else {
-            Err(())
+    loop {
+        let id = NEXT_BUFFER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if id == 0 {
+            continue;
         }
-    })
+
+        let owner_addr = owner as usize;
+        if with_registry_mut("register", |registry| {
+            registry.insert(id, owner_addr).is_none()
+        }) {
+            return Ok(id);
+        }
+    }
 }
 
-fn take_buffer_owner(owner: *mut c_void) -> bool {
-    if owner.is_null() {
-        return false;
+fn take_buffer_owner(owner_id: u64) -> Option<usize> {
+    if owner_id == 0 {
+        return None;
     }
 
-    let owner_addr = owner as usize;
-
-    with_registry_mut("take", |registry| registry.remove(&owner_addr))
+    with_registry_mut("take", |registry| registry.remove(&owner_id))
 }
 
 #[cfg(test)]
@@ -245,6 +252,7 @@ pub struct MwTerrainChunkBuffer {
     pub ptr: *mut MwTerrainChunkCoord,
     pub len: usize,
     owner: *mut c_void,
+    owner_id: u64,
 }
 
 impl MwTerrainChunkBuffer {
@@ -258,12 +266,18 @@ impl MwTerrainChunkBuffer {
         let len = boxed_vec.len();
         let owner_candidate = (&mut *boxed_vec) as *mut Vec<MwTerrainChunkCoord> as *mut c_void;
 
-        if register_buffer_owner(owner_candidate).is_err() {
-            return Self::default();
+        match register_buffer_owner(owner_candidate) {
+            Ok(owner_id) => {
+                let owner = Box::into_raw(boxed_vec) as *mut c_void;
+                Self {
+                    ptr,
+                    len,
+                    owner,
+                    owner_id,
+                }
+            },
+            Err(_) => Self::default(),
         }
-
-        let owner = Box::into_raw(boxed_vec) as *mut c_void;
-        Self { ptr, len, owner }
     }
 }
 
@@ -294,7 +308,8 @@ fn write_out_ptr<T>(out: *mut *mut T, value: Box<T>) -> MwResult {
 ///
 /// # Safety
 /// `out_config` must be a valid, writable pointer.
-#[unsafe(no_mangle)]
+#[cfg_attr(ffi_use_unsafe_attributes, unsafe(no_mangle))]
+#[cfg_attr(not(ffi_use_unsafe_attributes), no_mangle)]
 pub unsafe extern "C" fn mw_core_config_default(out_config: *mut MwCoreConfig) -> MwResult {
     if let Some(out) = unsafe { out_config.as_mut() } {
         *out = MwCoreConfig::default();
@@ -309,7 +324,8 @@ pub unsafe extern "C" fn mw_core_config_default(out_config: *mut MwCoreConfig) -
 /// # Safety
 /// `config` and `out_state` must be null or point to valid memory owned by the
 /// caller. Passing a null `config` pointer is allowed and uses default values.
-#[unsafe(no_mangle)]
+#[cfg_attr(ffi_use_unsafe_attributes, unsafe(no_mangle))]
+#[cfg_attr(not(ffi_use_unsafe_attributes), no_mangle)]
 pub unsafe extern "C" fn mw_core_create(
     config: *const MwCoreConfig,
     out_state: *mut *mut MwState,
@@ -329,7 +345,8 @@ pub unsafe extern "C" fn mw_core_create(
 ///
 /// # Safety
 /// `state` must be a pointer previously returned by [`mw_core_create`].
-#[unsafe(no_mangle)]
+#[cfg_attr(ffi_use_unsafe_attributes, unsafe(no_mangle))]
+#[cfg_attr(not(ffi_use_unsafe_attributes), no_mangle)]
 pub unsafe extern "C" fn mw_core_destroy(state: *mut MwState) {
     if !state.is_null() {
         drop(unsafe { Box::from_raw(state) });
@@ -353,23 +370,25 @@ fn with_state(state: *const MwState, f: impl FnOnce(&MajestikCore) -> MwResult) 
 /// Advance the simulation by `dt_seconds` seconds.
 ///
 /// # Parameters
-/// * `dt_seconds` — must be finite, non-negative, not exceed
-///   [`MAX_DELTA_TIME_SECONDS`], and must not be a positive subnormal. Both
-///   `+0.0` and `-0.0` are accepted to represent a zero-length step. Subnormal
+/// * `dt_seconds` — must be finite, not negative, not exceed
+///   [`MAX_DELTA_TIME_SECONDS`], and must not be a positive subnormal. `+0.0`
+///   is accepted as a zero-length step while `-0.0` and all negative values are
+///   rejected to avoid ambiguous floating-point comparisons. Subnormal
 ///   positives are rejected to avoid denormal slow paths on some CPUs.
 ///
 /// # Safety
 /// `state` must be a pointer previously returned by [`mw_core_create`].
-#[unsafe(no_mangle)]
+#[cfg_attr(ffi_use_unsafe_attributes, unsafe(no_mangle))]
+#[cfg_attr(not(ffi_use_unsafe_attributes), no_mangle)]
 pub unsafe extern "C" fn mw_core_tick(
     state: *mut MwState,
     dt_seconds: f32,
     update_terrain: MwBool,
 ) -> MwResult {
     if !dt_seconds.is_finite()
-        || dt_seconds < 0.0
+        || dt_seconds.is_sign_negative()
         || dt_seconds > MAX_DELTA_TIME_SECONDS
-        || (dt_seconds != 0.0 && dt_seconds != -0.0 && !dt_seconds.is_normal())
+        || (dt_seconds != 0.0 && !dt_seconds.is_normal())
     {
         return MwResult::InvalidDeltaTime;
     }
@@ -410,7 +429,8 @@ fn terrain_diff_into_mw(diff: TerrainDiff) -> MwTerrainDiff {
 /// # Safety
 /// `state` must be a valid pointer returned by [`mw_core_create`], `out_time`
 /// must be writable.
-#[unsafe(no_mangle)]
+#[cfg_attr(ffi_use_unsafe_attributes, unsafe(no_mangle))]
+#[cfg_attr(not(ffi_use_unsafe_attributes), no_mangle)]
 pub unsafe extern "C" fn mw_core_time_seconds(
     state: *const MwState,
     out_time: *mut f64,
@@ -423,7 +443,8 @@ pub unsafe extern "C" fn mw_core_time_seconds(
 /// # Safety
 /// `state` must be a valid pointer returned by [`mw_core_create`], `out_time`
 /// must be writable.
-#[unsafe(no_mangle)]
+#[cfg_attr(ffi_use_unsafe_attributes, unsafe(no_mangle))]
+#[cfg_attr(not(ffi_use_unsafe_attributes), no_mangle)]
 pub unsafe extern "C" fn mw_core_program_time_seconds(
     state: *const MwState,
     out_time: *mut f64,
@@ -438,7 +459,8 @@ pub unsafe extern "C" fn mw_core_program_time_seconds(
 /// # Safety
 /// `state` must be a valid pointer returned by [`mw_core_create`], `out_time`
 /// must be writable.
-#[unsafe(no_mangle)]
+#[cfg_attr(ffi_use_unsafe_attributes, unsafe(no_mangle))]
+#[cfg_attr(not(ffi_use_unsafe_attributes), no_mangle)]
 pub unsafe extern "C" fn mw_core_time_of_day_seconds(
     state: *const MwState,
     out_time: *mut f64,
@@ -453,7 +475,8 @@ pub unsafe extern "C" fn mw_core_time_of_day_seconds(
 /// # Safety
 /// `state` must be a valid pointer returned by [`mw_core_create`], `out_mode`
 /// must be writable.
-#[unsafe(no_mangle)]
+#[cfg_attr(ffi_use_unsafe_attributes, unsafe(no_mangle))]
+#[cfg_attr(not(ffi_use_unsafe_attributes), no_mangle)]
 pub unsafe extern "C" fn mw_core_game_mode(
     state: *const MwState,
     out_mode: *mut MwGameMode,
@@ -471,7 +494,8 @@ pub unsafe extern "C" fn mw_core_game_mode(
 /// releasing buffers contained in `MwTerrainDiff` via
 /// [`mw_terrain_chunk_buffer_free`] before mutating or destroying the returned
 /// state handle.
-#[unsafe(no_mangle)]
+#[cfg_attr(ffi_use_unsafe_attributes, unsafe(no_mangle))]
+#[cfg_attr(not(ffi_use_unsafe_attributes), no_mangle)]
 pub unsafe extern "C" fn mw_core_last_terrain_diff_take(
     state: *mut MwState,
     out_diff: *mut MwTerrainDiff,
@@ -502,46 +526,47 @@ pub unsafe extern "C" fn mw_core_last_terrain_diff_take(
 /// # Safety
 /// `buffer` must either be null or point to a valid buffer that has not yet
 /// been freed.
-#[unsafe(no_mangle)]
+#[cfg_attr(ffi_use_unsafe_attributes, unsafe(no_mangle))]
+#[cfg_attr(not(ffi_use_unsafe_attributes), no_mangle)]
 pub unsafe extern "C" fn mw_terrain_chunk_buffer_free(buffer: *mut MwTerrainChunkBuffer) {
     if let Some(buf) = unsafe { buffer.as_mut() } {
         let owner_ptr = buf.owner;
+        let owner_id = buf.owner_id;
 
-        if owner_ptr.is_null() {
+        if owner_ptr.is_null() || owner_id == 0 {
             buf.ptr = std::ptr::null_mut();
             buf.len = 0;
             buf.owner = std::ptr::null_mut();
+            buf.owner_id = 0;
             return;
         }
 
-        if (buf.ptr.is_null() && buf.len != 0) || (!buf.ptr.is_null() && buf.len == 0) {
-            take_buffer_owner(owner_ptr);
-            buf.ptr = std::ptr::null_mut();
-            buf.len = 0;
-            buf.owner = std::ptr::null_mut();
-            return;
-        }
-
-        if take_buffer_owner(owner_ptr) {
-            let owner_vec = owner_ptr as *mut Vec<MwTerrainChunkCoord>;
-            let matches_allocation = if buf.ptr.is_null() || buf.len == 0 {
-                true
-            } else {
-                let vec_ref = unsafe { &*owner_vec };
-                vec_ref.as_ptr() == buf.ptr && vec_ref.len() == buf.len
-            };
+        if let Some(raw_owner) = take_buffer_owner(owner_id) {
+            let owner_vec = raw_owner as *mut Vec<MwTerrainChunkCoord>;
+            let matches_allocation = owner_ptr as usize == raw_owner
+                && (buf.ptr.is_null()
+                    || buf.len == 0
+                    || unsafe {
+                        let vec_ref = &*owner_vec;
+                        vec_ref.as_ptr() == buf.ptr && vec_ref.len() == buf.len
+                    });
 
             if matches_allocation {
                 // SAFETY: `owner_vec` originates from `Box::into_raw` in
                 // `MwTerrainChunkBuffer::from_vec` and has been removed from the
                 // registry above, guaranteeing this drop occurs at most once.
                 unsafe { drop(Box::from_raw(owner_vec)) };
+            } else {
+                with_registry_mut("restore", |registry| {
+                    registry.insert(owner_id, raw_owner);
+                });
             }
         }
 
         buf.ptr = std::ptr::null_mut();
         buf.len = 0;
         buf.owner = std::ptr::null_mut();
+        buf.owner_id = 0;
     }
 }
 
@@ -625,12 +650,12 @@ mod tests {
     }
 
     #[test]
-    fn accepts_negative_zero_dt() {
+    fn rejects_negative_zero_dt() {
         let handle = create_state();
 
         assert_eq!(
             unsafe { mw_core_tick(handle, -0.0, MwBool::from(true)) },
-            MwResult::Success
+            MwResult::InvalidDeltaTime
         );
 
         unsafe { mw_core_destroy(handle) };
@@ -727,9 +752,14 @@ mod tests {
             assert!(!ffi_diff.new_chunks.owner.is_null());
             assert!(!ffi_diff.modified_chunks.owner.is_null());
             assert!(ffi_diff.removed_chunks.owner.is_null());
+            assert_ne!(ffi_diff.new_chunks.owner_id, 0);
+            assert_ne!(ffi_diff.modified_chunks.owner_id, 0);
+            assert_eq!(ffi_diff.removed_chunks.owner_id, 0);
 
             mw_terrain_chunk_buffer_free(&mut ffi_diff.new_chunks);
+            assert_eq!(ffi_diff.new_chunks.owner_id, 0);
             mw_terrain_chunk_buffer_free(&mut ffi_diff.modified_chunks);
+            assert_eq!(ffi_diff.modified_chunks.owner_id, 0);
             mw_terrain_chunk_buffer_free(&mut ffi_diff.removed_chunks);
         }
     }
@@ -741,6 +771,7 @@ mod tests {
         assert!(buffer.ptr.is_null());
         assert_eq!(buffer.len, 0);
         assert!(buffer.owner.is_null());
+        assert_eq!(buffer.owner_id, 0);
     }
 
     #[test]
@@ -763,17 +794,20 @@ mod tests {
         assert!(!buffer.ptr.is_null());
         assert_eq!(buffer.len, 1);
         assert!(!buffer.owner.is_null());
+        assert_ne!(buffer.owner_id, 0);
 
         unsafe { mw_terrain_chunk_buffer_free(&mut buffer) };
 
         assert!(buffer.ptr.is_null());
         assert_eq!(buffer.len, 0);
         assert!(buffer.owner.is_null());
+        assert_eq!(buffer.owner_id, 0);
 
         unsafe { mw_terrain_chunk_buffer_free(&mut buffer) };
         assert!(buffer.ptr.is_null());
         assert_eq!(buffer.len, 0);
         assert!(buffer.owner.is_null());
+        assert_eq!(buffer.owner_id, 0);
     }
 
     #[test]
@@ -782,6 +816,7 @@ mod tests {
             ptr: ptr::null_mut(),
             len: 1,
             owner: ptr::null_mut(),
+            owner_id: 0,
         };
 
         unsafe { mw_terrain_chunk_buffer_free(&mut buffer) };
@@ -789,21 +824,25 @@ mod tests {
         assert!(buffer.ptr.is_null());
         assert_eq!(buffer.len, 0);
         assert!(buffer.owner.is_null());
+        assert_eq!(buffer.owner_id, 0);
 
         unsafe { mw_terrain_chunk_buffer_free(&mut buffer) };
         assert!(buffer.ptr.is_null());
         assert_eq!(buffer.len, 0);
         assert!(buffer.owner.is_null());
+        assert_eq!(buffer.owner_id, 0);
 
         let mut inconsistent_len =
             MwTerrainChunkBuffer::from_vec(vec![MwTerrainChunkCoord { x: 5, y: 6 }]);
         assert!(!inconsistent_len.owner.is_null());
+        assert_ne!(inconsistent_len.owner_id, 0);
         inconsistent_len.len = 0;
 
         unsafe { mw_terrain_chunk_buffer_free(&mut inconsistent_len) };
         assert!(inconsistent_len.ptr.is_null());
         assert_eq!(inconsistent_len.len, 0);
         assert!(inconsistent_len.owner.is_null());
+        assert_eq!(inconsistent_len.owner_id, 0);
 
         let mut inconsistent_ptr =
             MwTerrainChunkBuffer::from_vec(vec![MwTerrainChunkCoord { x: -2, y: 3 }]);
@@ -813,6 +852,7 @@ mod tests {
         assert!(inconsistent_ptr.ptr.is_null());
         assert_eq!(inconsistent_ptr.len, 0);
         assert!(inconsistent_ptr.owner.is_null());
+        assert_eq!(inconsistent_ptr.owner_id, 0);
     }
 
     #[test]
@@ -821,6 +861,7 @@ mod tests {
         let mut second = MwTerrainChunkBuffer::from_vec(vec![MwTerrainChunkCoord { x: 1, y: 1 }]);
 
         let second_owner = second.owner;
+        let second_owner_id = second.owner_id;
 
         // Corrupt the exposed buffer to describe the wrong allocation.
         second.ptr = first.ptr;
@@ -831,12 +872,57 @@ mod tests {
         assert!(second.ptr.is_null());
         assert_eq!(second.len, 0);
         assert!(second.owner.is_null());
+        assert_eq!(second.owner_id, 0);
 
         // Clean up the original allocations.
         unsafe { mw_terrain_chunk_buffer_free(&mut first) };
 
-        // Recover the leaked owner in tests to avoid polluting subsequent cases.
-        unsafe { drop(Box::from_raw(second_owner as *mut Vec<MwTerrainChunkCoord>)) };
+        // Recover the preserved owner entry and drop it to avoid polluting later tests.
+        if let Some(restored) = take_buffer_owner(second_owner_id) {
+            assert_eq!(restored, second_owner as usize);
+            unsafe { drop(Box::from_raw(restored as *mut Vec<MwTerrainChunkCoord>)) };
+        }
+    }
+
+    #[test]
+    fn buffer_ids_are_unique() {
+        let mut first = MwTerrainChunkBuffer::from_vec(vec![MwTerrainChunkCoord { x: 2, y: 3 }]);
+        let mut second = MwTerrainChunkBuffer::from_vec(vec![MwTerrainChunkCoord { x: 4, y: 5 }]);
+
+        assert_ne!(first.owner_id, 0);
+        assert_ne!(second.owner_id, 0);
+        assert_ne!(first.owner_id, second.owner_id);
+
+        unsafe {
+            mw_terrain_chunk_buffer_free(&mut first);
+            mw_terrain_chunk_buffer_free(&mut second);
+        }
+        assert_eq!(buffer_owner_registry_len(), 0);
+    }
+
+    #[test]
+    fn stale_buffer_cannot_free_new_owner() {
+        let mut original = MwTerrainChunkBuffer::from_vec(vec![MwTerrainChunkCoord { x: 6, y: 7 }]);
+        let mut stale_copy = original;
+
+        unsafe { mw_terrain_chunk_buffer_free(&mut original) };
+        assert_eq!(buffer_owner_registry_len(), 0);
+
+        let mut replacement =
+            MwTerrainChunkBuffer::from_vec(vec![MwTerrainChunkCoord { x: 8, y: 9 }]);
+        assert_ne!(replacement.owner_id, 0);
+        let registry_before = buffer_owner_registry_len();
+        let replacement_owner = replacement.owner;
+        let replacement_id = replacement.owner_id;
+
+        unsafe { mw_terrain_chunk_buffer_free(&mut stale_copy) };
+
+        assert_eq!(buffer_owner_registry_len(), registry_before);
+        assert_eq!(replacement.owner, replacement_owner);
+        assert_eq!(replacement.owner_id, replacement_id);
+
+        unsafe { mw_terrain_chunk_buffer_free(&mut replacement) };
+        assert_eq!(buffer_owner_registry_len(), 0);
     }
 
     #[test]
@@ -847,13 +933,15 @@ mod tests {
         assert!(buffer.ptr.is_null());
         assert_eq!(buffer.len, 0);
         assert!(buffer.owner.is_null());
+        assert_eq!(buffer.owner_id, 0);
         assert_eq!(buffer_owner_registry_len(), 0);
     }
 
     #[test]
     fn take_buffer_owner_recovers_from_poison() {
-        let owner = Box::into_raw(Box::new(Vec::<MwTerrainChunkCoord>::new())) as *mut c_void;
-        assert!(register_buffer_owner(owner).is_ok());
+        let owner = Box::into_raw(Box::new(Vec::<MwTerrainChunkCoord>::new()));
+        let owner_handle = owner as *mut c_void;
+        let owner_id = register_buffer_owner(owner_handle).expect("owner must register");
 
         REGISTRY_POISON_LOGGED.store(false, std::sync::atomic::Ordering::SeqCst);
 
@@ -868,11 +956,12 @@ mod tests {
         barrier.wait();
         let _ = handle.join();
 
-        assert!(take_buffer_owner(owner));
+        let taken = take_buffer_owner(owner_id).expect("owner removed despite poison");
+        assert_eq!(taken, owner_handle as usize);
         assert!(REGISTRY_POISON_LOGGED.swap(false, std::sync::atomic::Ordering::SeqCst));
 
         unsafe {
-            drop(Box::from_raw(owner as *mut Vec<MwTerrainChunkCoord>));
+            drop(Box::from_raw(taken as *mut Vec<MwTerrainChunkCoord>));
         }
     }
 
