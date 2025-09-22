@@ -183,7 +183,7 @@ fn buffer_owner_registry() -> &'static Mutex<HashMap<u64, BufferOwnerEntry>> {
 
 static NEXT_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
 
-const MAX_BUFFER_ID_ATTEMPTS: usize = 1_024;
+const MAX_BUFFER_ID_ATTEMPTS: usize = 64;
 
 #[cfg(test)]
 static FORCE_REGISTER_FAILURE: AtomicBool = AtomicBool::new(false);
@@ -448,9 +448,6 @@ pub unsafe extern "C" fn mw_core_tick(
         let config = TickConfig {
             update_terrain: update_terrain != 0,
         };
-        if dt_seconds < 0.0 || !dt_seconds.is_finite() {
-            return MwResult::InvalidDeltaTime;
-        }
         core.tick(Duration::from_secs_f32(dt_seconds), config);
         MwResult::Success
     })
@@ -612,15 +609,10 @@ pub unsafe extern "C" fn mw_terrain_chunk_buffer_free(buffer: *mut MwTerrainChun
             } else {
                 with_registry_mut("restore", |registry| {
                     if registry.insert(owner_id, entry).is_some() {
-                        #[cfg(debug_assertions)]
-                        panic!(
-                            "Impossible buffer owner registry collision on restore for ID {}",
-                            owner_id
-                        );
-                        #[cfg(not(debug_assertions))]
                         eprintln!(
-                            "CRITICAL: Buffer owner registry collision on restore for ID {}. \
-                             Memory will be leaked.",
+                            "WARNING: Buffer owner registry collision on restore for ID {}. This \
+                             indicates a buffer validation bug. Memory will be leaked to prevent \
+                             use-after-free. Please report this issue with reproduction steps.",
                             owner_id
                         );
                     }

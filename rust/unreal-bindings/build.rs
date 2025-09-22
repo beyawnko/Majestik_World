@@ -1,40 +1,66 @@
 use std::process::Command;
 
 fn rustc_path_is_safe(rustc: &str) -> bool {
-    !rustc.is_empty()
-        && !rustc.chars().any(|ch| {
-            matches!(
-                ch,
-                ';' | '&'
-                    | '|'
-                    | '`'
-                    | '$'
-                    | '>'
-                    | '<'
-                    | '\n'
-                    | '\r'
-                    | '\0'
-                    | '\t'
-                    | '"'
-                    | '\''
-                    | '\\'
-                    | '*'
-                    | '?'
-                    | '['
-                    | ']'
-                    | '{'
-                    | '}'
-                    | '('
-                    | ')'
-                    | '~'
-                    | '#'
-                    | '!'
-                    | '%'
-            )
-        })
-        && !rustc.contains("..")
-        && !rustc.starts_with('-')
-        && rustc.len() < 4_096
+    if rustc.is_empty() || rustc.len() >= 4_096 {
+        return false;
+    }
+
+    if rustc.chars().any(|ch| {
+        matches!(
+            ch,
+            ';' | '&'
+                | '|'
+                | '`'
+                | '$'
+                | '>'
+                | '<'
+                | '\n'
+                | '\r'
+                | '\0'
+                | '\t'
+                | '"'
+                | '\''
+                | '\\'
+                | '*'
+                | '?'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '('
+                | ')'
+                | '~'
+                | '#'
+                | '!'
+                | '%'
+                | '^'
+        )
+    }) {
+        return false;
+    }
+
+    if rustc.contains("..") || rustc.starts_with('-') {
+        return false;
+    }
+
+    let is_simple = !rustc.contains('/') && !rustc.contains('\\');
+    let bytes = rustc.as_bytes();
+    let is_absolute_unix = rustc.starts_with('/');
+    let is_absolute_windows = bytes.len() >= 3
+        && bytes[1] == b':'
+        && (bytes[2] == b'/' || bytes[2] == b'\\')
+        && bytes[0].is_ascii_alphabetic();
+    let is_unc = rustc.starts_with("\\\\");
+
+    if !(is_simple || is_absolute_unix || is_absolute_windows || is_unc) {
+        return false;
+    }
+
+    if is_simple && rustc.contains(':') {
+        return false;
+    }
+
+    true
 }
 
 fn main() {
@@ -86,6 +112,7 @@ mod tests {
         assert!(!rustc_path_is_safe("rustc#fragment"));
         assert!(!rustc_path_is_safe("rustc!history"));
         assert!(!rustc_path_is_safe("rustc%env"));
+        assert!(!rustc_path_is_safe("rustc^caret"));
     }
 
     #[test]
@@ -93,6 +120,18 @@ mod tests {
         assert!(!rustc_path_is_safe("/usr/bin/../../../bin/sh"));
         assert!(!rustc_path_is_safe("../rustc"));
         assert!(!rustc_path_is_safe("rustc/../evil"));
+    }
+
+    #[test]
+    fn distinguishes_absolute_simple_and_relative_paths() {
+        assert!(rustc_path_is_safe("rustc"));
+        assert!(rustc_path_is_safe("/usr/bin/rustc"));
+        assert!(rustc_path_is_safe("C:/Program Files/Rust/bin/rustc.exe"));
+        assert!(rustc_path_is_safe(
+            "C\\\\Program Files\\Rust\\bin\\rustc.exe"
+        ));
+        assert!(!rustc_path_is_safe("bin/rustc"));
+        assert!(!rustc_path_is_safe(".\\rustc.exe"));
     }
 
     #[test]

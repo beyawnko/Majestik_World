@@ -42,25 +42,17 @@ impl TerrainDiff {
     /// Build a diff from the provided terrain change sets, deduplicating chunk
     /// coordinates and returning them in a deterministic sorted order. This
     /// guarantees the FFI surface never reports duplicate entries while keeping
-    /// memory churn low for large updates by deduplicating with a `HashSet`
-    /// before performing a single in-place sort.
+    /// the hot path small-set friendly by performing an in-place
+    /// `sort_unstable` followed by `dedup`.
     fn from_terrain_changes(changes: &TerrainChanges) -> Self {
         fn collect_chunks<'a>(
             iter: impl Iterator<Item = &'a vek::Vec2<i32>>,
         ) -> Vec<TerrainChunkCoord> {
-            use std::collections::HashSet;
-
-            let mut seen = HashSet::new();
-            let mut result = Vec::new();
-
-            for pos in iter {
-                let coord = TerrainChunkCoord::new(pos.x, pos.y);
-                if seen.insert(coord) {
-                    result.push(coord);
-                }
-            }
-
+            let mut result: Vec<_> = iter
+                .map(|pos| TerrainChunkCoord::new(pos.x, pos.y))
+                .collect();
             result.sort_unstable();
+            result.dedup();
             result
         }
 
@@ -222,10 +214,10 @@ impl MajestikCore {
 
     /// Run a read-only ECS query that must return owned data.
     ///
-    /// By constraining the return type to `Send + 'static`, this helper
-    /// prevents callers from leaking references tied to the world outside
-    /// the closure, eliminating a common class of use-after-free bugs when
-    /// integrating with foreign runtimes.
+    /// By constraining the return type to `Send + 'static`, this helper acts as
+    /// a safety firewall that prevents callers from leaking references tied to
+    /// the world outside the closure, eliminating a common class of
+    /// use-after-free bugs when integrating with foreign runtimes.
     ///
     /// # Safety
     /// The provided closure must not retain references, Specs handles, or
@@ -234,6 +226,31 @@ impl MajestikCore {
     /// data that doesn't contain any borrowed references to the World.
     /// Violating these constraints will cause undefined behavior when
     /// integrating with foreign runtimes.
+    ///
+    /// # Examples
+    /// ```ignore
+    /// # use majestic_world_core::MajestikCore;
+    /// # use veloren_common::resources::Time;
+    /// # fn demo(core: &MajestikCore) {
+    /// let time_data = core.query_world_owned(|world| {
+    ///     let time = world.read_resource::<Time>().0; // ✓ Owned f64 copied out
+    ///     let name = "player".to_string(); // ✓ Owned String
+    ///     (time, name)
+    /// });
+    /// # let _ = time_data;
+    /// # }
+    /// ```
+    /// ```ignore
+    /// # use majestic_world_core::MajestikCore;
+    /// # use veloren_common::resources::Time;
+    /// # fn bad(core: &MajestikCore) {
+    /// // ✗ NEVER do this:
+    /// // let bad_ref = core.query_world_owned(|world| world.read_resource::<Time>());
+    /// // Returning a reference pierces the safety firewall and will dangle once the
+    /// // ECS mutates.
+    /// # let _ = core;
+    /// # }
+    /// ```
     pub fn query_world_owned<R>(&self, visitor: impl FnOnce(&World) -> R) -> R
     where
         R: Send + 'static,
