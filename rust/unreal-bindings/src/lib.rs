@@ -12,7 +12,7 @@ use std::{
 };
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use std::sync::atomic::AtomicU64;
 
@@ -110,7 +110,7 @@ pub struct MwCoreConfig {
     pub day_cycle_coefficient: f64,
     /// Integer representation of [`MwGameMode`]. Values outside the declared
     /// discriminants cause [`mw_core_create`] to return
-    /// [`MwResult::InternalError`].
+    /// [`MwResult::InvalidGameMode`].
     pub game_mode: i32,
 }
 
@@ -128,7 +128,7 @@ impl Default for MwCoreConfig {
 
 impl MwCoreConfig {
     fn try_game_mode(self) -> Result<MwGameMode, MwResult> {
-        MwGameMode::try_from(self.game_mode).map_err(|_| MwResult::InternalError)
+        MwGameMode::try_from(self.game_mode).map_err(|_| MwResult::InvalidGameMode)
     }
 
     fn try_into_core_config(self) -> Result<CoreInitConfig, MwResult> {
@@ -160,15 +160,30 @@ impl From<TerrainChunkCoord> for MwTerrainChunkCoord {
     }
 }
 
-fn buffer_owner_registry() -> &'static Mutex<HashMap<u64, usize>> {
-    static REGISTRY: OnceLock<Mutex<HashMap<u64, usize>>> = OnceLock::new();
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BufferOwnerEntry {
+    owner_addr: usize,
+    data_ptr: *mut MwTerrainChunkCoord,
+    len: usize,
+}
+
+unsafe impl Send for BufferOwnerEntry {}
+unsafe impl Sync for BufferOwnerEntry {}
+
+fn buffer_owner_registry() -> &'static Mutex<HashMap<u64, BufferOwnerEntry>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<u64, BufferOwnerEntry>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 static NEXT_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
 
+const MAX_BUFFER_ID_ATTEMPTS: usize = 1_024;
+
 #[cfg(test)]
 static FORCE_REGISTER_FAILURE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+static FORCE_REGISTER_COLLISIONS: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(test)]
 static REGISTRY_POISON_LOGGED: AtomicBool = AtomicBool::new(false);
@@ -184,7 +199,7 @@ fn log_registry_poison(operation: &'static str) {
 
 fn with_registry_mut<R>(
     operation: &'static str,
-    f: impl FnOnce(&mut HashMap<u64, usize>) -> R,
+    f: impl FnOnce(&mut HashMap<u64, BufferOwnerEntry>) -> R,
 ) -> R {
     match buffer_owner_registry().lock() {
         Ok(mut guard) => f(&mut guard),
@@ -196,7 +211,15 @@ fn with_registry_mut<R>(
     }
 }
 
-fn register_buffer_owner(owner: *mut c_void) -> Result<u64, ()> {
+fn log_buffer_creation_failure(reason: &str) {
+    eprintln!("mw terrain chunk buffer allocation failed: {reason}");
+}
+
+fn register_buffer_owner(
+    owner: *mut c_void,
+    data_ptr: *mut MwTerrainChunkCoord,
+    len: usize,
+) -> Result<u64, ()> {
     if owner.is_null() {
         return Err(());
     }
@@ -206,22 +229,36 @@ fn register_buffer_owner(owner: *mut c_void) -> Result<u64, ()> {
         return Err(());
     }
 
-    loop {
+    for _ in 0..MAX_BUFFER_ID_ATTEMPTS {
         let id = NEXT_BUFFER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if id == 0 {
             continue;
         }
 
-        let owner_addr = owner as usize;
-        if with_registry_mut("register", |registry| {
-            registry.insert(id, owner_addr).is_none()
-        }) {
+        #[cfg(test)]
+        {
+            let collisions = FORCE_REGISTER_COLLISIONS.load(Ordering::SeqCst);
+            if collisions > 0 {
+                FORCE_REGISTER_COLLISIONS.store(collisions - 1, Ordering::SeqCst);
+                continue;
+            }
+        }
+
+        let entry = BufferOwnerEntry {
+            owner_addr: owner as usize,
+            data_ptr,
+            len,
+        };
+
+        if with_registry_mut("register", |registry| registry.insert(id, entry).is_none()) {
             return Ok(id);
         }
     }
+
+    Err(())
 }
 
-fn take_buffer_owner(owner_id: u64) -> Option<usize> {
+fn take_buffer_owner(owner_id: u64) -> Option<BufferOwnerEntry> {
     if owner_id == 0 {
         return None;
     }
@@ -257,7 +294,12 @@ pub struct MwTerrainChunkBuffer {
 
 impl MwTerrainChunkBuffer {
     fn from_vec(coords: Vec<MwTerrainChunkCoord>) -> Self {
-        if coords.len() > MAX_CHUNK_COORDS || coords.is_empty() {
+        if coords.is_empty() {
+            return Self::default();
+        }
+
+        if coords.len() > MAX_CHUNK_COORDS {
+            log_buffer_creation_failure("coordinate count exceeds MAX_CHUNK_COORDS");
             return Self::default();
         }
 
@@ -266,7 +308,7 @@ impl MwTerrainChunkBuffer {
         let len = boxed_vec.len();
         let owner_candidate = (&mut *boxed_vec) as *mut Vec<MwTerrainChunkCoord> as *mut c_void;
 
-        match register_buffer_owner(owner_candidate) {
+        match register_buffer_owner(owner_candidate, ptr, len) {
             Ok(owner_id) => {
                 let owner = Box::into_raw(boxed_vec) as *mut c_void;
                 Self {
@@ -276,7 +318,10 @@ impl MwTerrainChunkBuffer {
                     owner_id,
                 }
             },
-            Err(_) => Self::default(),
+            Err(_) => {
+                log_buffer_creation_failure("buffer owner registration failed");
+                Self::default()
+            },
         }
     }
 }
@@ -388,7 +433,7 @@ pub unsafe extern "C" fn mw_core_tick(
     if !dt_seconds.is_finite()
         || dt_seconds.is_sign_negative()
         || dt_seconds > MAX_DELTA_TIME_SECONDS
-        || (dt_seconds != 0.0 && !dt_seconds.is_normal())
+        || (dt_seconds > 0.0 && dt_seconds.is_subnormal())
     {
         return MwResult::InvalidDeltaTime;
     }
@@ -541,24 +586,25 @@ pub unsafe extern "C" fn mw_terrain_chunk_buffer_free(buffer: *mut MwTerrainChun
             return;
         }
 
-        if let Some(raw_owner) = take_buffer_owner(owner_id) {
-            let owner_vec = raw_owner as *mut Vec<MwTerrainChunkCoord>;
-            let matches_allocation = owner_ptr as usize == raw_owner
+        if let Some(entry) = take_buffer_owner(owner_id) {
+            let matches_owner = owner_ptr as usize == entry.owner_addr;
+            let matches_allocation = matches_owner
                 && (buf.ptr.is_null()
                     || buf.len == 0
-                    || unsafe {
-                        let vec_ref = &*owner_vec;
-                        vec_ref.as_ptr() == buf.ptr && vec_ref.len() == buf.len
-                    });
+                    || (entry.data_ptr == buf.ptr && entry.len == buf.len));
 
             if matches_allocation {
-                // SAFETY: `owner_vec` originates from `Box::into_raw` in
+                // SAFETY: `entry.owner_addr` originates from `Box::into_raw` in
                 // `MwTerrainChunkBuffer::from_vec` and has been removed from the
                 // registry above, guaranteeing this drop occurs at most once.
-                unsafe { drop(Box::from_raw(owner_vec)) };
+                unsafe {
+                    drop(Box::from_raw(
+                        entry.owner_addr as *mut Vec<MwTerrainChunkCoord>,
+                    ))
+                };
             } else {
                 with_registry_mut("restore", |registry| {
-                    registry.insert(owner_id, raw_owner);
+                    registry.insert(owner_id, entry);
                 });
             }
         }
@@ -636,6 +682,7 @@ mod tests {
     fn rejects_subnormal_delta_time() {
         let handle = create_state();
         let subnormal = f32::from_bits(1); // smallest positive subnormal
+        let smallest_normal = f32::MIN_POSITIVE;
 
         assert_eq!(
             unsafe { mw_core_tick(handle, subnormal, 0) },
@@ -644,6 +691,10 @@ mod tests {
         assert_eq!(
             unsafe { mw_core_tick(handle, -subnormal, 0) },
             MwResult::InvalidDeltaTime
+        );
+        assert_eq!(
+            unsafe { mw_core_tick(handle, smallest_normal, 0) },
+            MwResult::Success
         );
 
         unsafe { mw_core_destroy(handle) };
@@ -783,7 +834,7 @@ mod tests {
         let mut handle: *mut MwState = ptr::null_mut();
         assert_eq!(
             unsafe { mw_core_create(&config, &mut handle) },
-            MwResult::InternalError
+            MwResult::InvalidGameMode
         );
         assert!(handle.is_null());
     }
@@ -879,8 +930,12 @@ mod tests {
 
         // Recover the preserved owner entry and drop it to avoid polluting later tests.
         if let Some(restored) = take_buffer_owner(second_owner_id) {
-            assert_eq!(restored, second_owner as usize);
-            unsafe { drop(Box::from_raw(restored as *mut Vec<MwTerrainChunkCoord>)) };
+            assert_eq!(restored.owner_addr, second_owner as usize);
+            unsafe {
+                drop(Box::from_raw(
+                    restored.owner_addr as *mut Vec<MwTerrainChunkCoord>,
+                ))
+            };
         }
     }
 
@@ -938,10 +993,32 @@ mod tests {
     }
 
     #[test]
+    fn register_buffer_owner_respects_attempt_limit() {
+        FORCE_REGISTER_COLLISIONS
+            .store(MAX_BUFFER_ID_ATTEMPTS, std::sync::atomic::Ordering::SeqCst);
+
+        let mut boxed = Box::new(vec![MwTerrainChunkCoord { x: 1, y: 1 }]);
+        let ptr = boxed.as_mut_ptr();
+        let len = boxed.len();
+        let owner_handle = (&mut *boxed) as *mut Vec<MwTerrainChunkCoord> as *mut c_void;
+
+        assert!(register_buffer_owner(owner_handle, ptr, len).is_err());
+        assert_eq!(
+            FORCE_REGISTER_COLLISIONS.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        FORCE_REGISTER_COLLISIONS.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[test]
     fn take_buffer_owner_recovers_from_poison() {
-        let owner = Box::into_raw(Box::new(Vec::<MwTerrainChunkCoord>::new()));
-        let owner_handle = owner as *mut c_void;
-        let owner_id = register_buffer_owner(owner_handle).expect("owner must register");
+        let mut owner_box = Box::new(vec![MwTerrainChunkCoord { x: 0, y: 0 }]);
+        let owner_handle = (&mut *owner_box) as *mut Vec<MwTerrainChunkCoord> as *mut c_void;
+        let owner_ptr = owner_box.as_mut_ptr();
+        let owner_len = owner_box.len();
+        let owner_id =
+            register_buffer_owner(owner_handle, owner_ptr, owner_len).expect("owner must register");
+        let _owner = Box::into_raw(owner_box);
 
         REGISTRY_POISON_LOGGED.store(false, std::sync::atomic::Ordering::SeqCst);
 
@@ -957,11 +1034,13 @@ mod tests {
         let _ = handle.join();
 
         let taken = take_buffer_owner(owner_id).expect("owner removed despite poison");
-        assert_eq!(taken, owner_handle as usize);
+        assert_eq!(taken.owner_addr, owner_handle as usize);
         assert!(REGISTRY_POISON_LOGGED.swap(false, std::sync::atomic::Ordering::SeqCst));
 
         unsafe {
-            drop(Box::from_raw(taken as *mut Vec<MwTerrainChunkCoord>));
+            drop(Box::from_raw(
+                taken.owner_addr as *mut Vec<MwTerrainChunkCoord>,
+            ));
         }
     }
 

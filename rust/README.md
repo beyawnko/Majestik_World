@@ -1,4 +1,4 @@
-# Majestik World UE5 Core Workspace
+# Majestic World UE5 Core Workspace
 
 This directory hosts the additive crates introduced for the UE5 migration
 roadmap documented in `UE5_PLUGIN_MASTER_PLAN.md` and
