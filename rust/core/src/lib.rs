@@ -4,7 +4,7 @@
 //! `docs/ue5_plugin_migration_plan.md`, extracting a deterministic simulation
 //! interface that can be linked from external runtimes.
 
-use std::{collections::BTreeSet, fmt, sync::Arc, time::Duration};
+use std::{fmt, sync::Arc, time::Duration};
 
 use specs::{World, world::WorldExt};
 use veloren_common::{
@@ -41,17 +41,27 @@ pub struct TerrainDiff {
 impl TerrainDiff {
     /// Build a diff from the provided terrain change sets, deduplicating chunk
     /// coordinates and returning them in a deterministic sorted order. This
-    /// guarantees the FFI surface never reports duplicate entries while relying
-    /// on a `BTreeSet` to maintain ordering during collection, avoiding an
-    /// additional sorting pass for large updates.
+    /// guarantees the FFI surface never reports duplicate entries while keeping
+    /// memory churn low for large updates by deduplicating with a `HashSet`
+    /// before performing a single in-place sort.
     fn from_terrain_changes(changes: &TerrainChanges) -> Self {
         fn collect_chunks<'a>(
             iter: impl Iterator<Item = &'a vek::Vec2<i32>>,
         ) -> Vec<TerrainChunkCoord> {
-            iter.map(|pos| TerrainChunkCoord::new(pos.x, pos.y))
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect()
+            use std::collections::HashSet;
+
+            let mut seen = HashSet::new();
+            let mut result = Vec::new();
+
+            for pos in iter {
+                let coord = TerrainChunkCoord::new(pos.x, pos.y);
+                if seen.insert(coord) {
+                    result.push(coord);
+                }
+            }
+
+            result.sort_unstable();
+            result
         }
 
         Self {
@@ -220,8 +230,10 @@ impl MajestikCore {
     /// # Safety
     /// The provided closure must not retain references, Specs handles, or
     /// iterators that borrow from the `World` beyond this call, nor may it
-    /// invoke APIs that mutate the ECS. Doing so would desynchronise the
-    /// simulation state from external runtimes.
+    /// invoke APIs that mutate the ECS. The closure must only return owned
+    /// data that doesn't contain any borrowed references to the World.
+    /// Violating these constraints will cause undefined behavior when
+    /// integrating with foreign runtimes.
     pub fn query_world_owned<R>(&self, visitor: impl FnOnce(&World) -> R) -> R
     where
         R: Send + 'static,

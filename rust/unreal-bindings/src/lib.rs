@@ -167,6 +167,12 @@ struct BufferOwnerEntry {
     len: usize,
 }
 
+// SAFETY: `BufferOwnerEntry` only carries raw pointers and metadata describing
+// a heap allocation tracked by the buffer owner registry. Access to the
+// registry is synchronised by a `Mutex`, and entries are never dereferenced
+// while the lock is held—callers only compare addresses or convert them back
+// into a `Box` after successful removal. Sharing entries across threads
+// therefore does not introduce data races or invalid aliasing.
 unsafe impl Send for BufferOwnerEntry {}
 unsafe impl Sync for BufferOwnerEntry {}
 
@@ -220,7 +226,7 @@ fn register_buffer_owner(
     data_ptr: *mut MwTerrainChunkCoord,
     len: usize,
 ) -> Result<u64, ()> {
-    if owner.is_null() {
+    if owner.is_null() || data_ptr.is_null() {
         return Err(());
     }
 
@@ -442,6 +448,9 @@ pub unsafe extern "C" fn mw_core_tick(
         let config = TickConfig {
             update_terrain: update_terrain != 0,
         };
+        if dt_seconds < 0.0 || !dt_seconds.is_finite() {
+            return MwResult::InvalidDeltaTime;
+        }
         core.tick(Duration::from_secs_f32(dt_seconds), config);
         MwResult::Success
     })
@@ -587,24 +596,34 @@ pub unsafe extern "C" fn mw_terrain_chunk_buffer_free(buffer: *mut MwTerrainChun
         }
 
         if let Some(entry) = take_buffer_owner(owner_id) {
-            let matches_owner = owner_ptr as usize == entry.owner_addr;
-            let matches_allocation = matches_owner
-                && (buf.ptr.is_null()
-                    || buf.len == 0
-                    || (entry.data_ptr == buf.ptr && entry.len == buf.len));
+            let owner_matches = owner_ptr as usize == entry.owner_addr;
+            let data_matches = buf.ptr == entry.data_ptr && buf.len == entry.len;
+            let is_empty_buffer = buf.ptr.is_null() || buf.len == 0;
 
-            if matches_allocation {
+            if owner_matches && (data_matches || is_empty_buffer) {
                 // SAFETY: `entry.owner_addr` originates from `Box::into_raw` in
                 // `MwTerrainChunkBuffer::from_vec` and has been removed from the
                 // registry above, guaranteeing this drop occurs at most once.
                 unsafe {
                     drop(Box::from_raw(
                         entry.owner_addr as *mut Vec<MwTerrainChunkCoord>,
-                    ))
-                };
+                    ));
+                }
             } else {
                 with_registry_mut("restore", |registry| {
-                    registry.insert(owner_id, entry);
+                    if registry.insert(owner_id, entry).is_some() {
+                        #[cfg(debug_assertions)]
+                        panic!(
+                            "Impossible buffer owner registry collision on restore for ID {}",
+                            owner_id
+                        );
+                        #[cfg(not(debug_assertions))]
+                        eprintln!(
+                            "CRITICAL: Buffer owner registry collision on restore for ID {}. \
+                             Memory will be leaked.",
+                            owner_id
+                        );
+                    }
                 });
             }
         }
@@ -669,6 +688,14 @@ mod tests {
             unsafe { mw_core_tick(handle, MAX_DELTA_TIME_SECONDS + 1.0, 0) },
             MwResult::InvalidDeltaTime
         );
+        assert_eq!(
+            unsafe { mw_core_tick(handle, f32::INFINITY, 0) },
+            MwResult::InvalidDeltaTime
+        );
+        assert_eq!(
+            unsafe { mw_core_tick(handle, f32::NEG_INFINITY, 0) },
+            MwResult::InvalidDeltaTime
+        );
         assert_eq!(unsafe { mw_core_tick(handle, 0.0, 0) }, MwResult::Success);
         assert_eq!(
             unsafe { mw_core_tick(handle, MAX_DELTA_TIME_SECONDS, 0) },
@@ -706,6 +733,22 @@ mod tests {
 
         assert_eq!(
             unsafe { mw_core_tick(handle, -0.0, MwBool::from(true)) },
+            MwResult::InvalidDeltaTime
+        );
+
+        unsafe { mw_core_destroy(handle) };
+    }
+
+    #[test]
+    fn validates_dt_before_duration_conversion() {
+        let handle = create_state();
+
+        assert_eq!(
+            unsafe { mw_core_tick(handle, f32::INFINITY, 0) },
+            MwResult::InvalidDeltaTime
+        );
+        assert_eq!(
+            unsafe { mw_core_tick(handle, f32::NEG_INFINITY, 0) },
             MwResult::InvalidDeltaTime
         );
 
@@ -1008,6 +1051,14 @@ mod tests {
             0
         );
         FORCE_REGISTER_COLLISIONS.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[test]
+    fn register_buffer_owner_rejects_null_data_ptr() {
+        let mut owner_box = Box::new(vec![MwTerrainChunkCoord { x: 1, y: 1 }]);
+        let owner_handle = (&mut *owner_box) as *mut Vec<MwTerrainChunkCoord> as *mut c_void;
+
+        assert!(register_buffer_owner(owner_handle, std::ptr::null_mut(), 1).is_err());
     }
 
     #[test]
