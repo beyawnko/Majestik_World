@@ -15,4 +15,4 @@ crate-type = ["staticlib", "cdylib"]
 majestic-world-core = { path = "../core" }
 
 [dev-dependencies]
-majestic-world-core = { path = "../core", features = ["ffi-test-hooks"] }
+majestic-world-core = { path = "../core", features = ["test-only-unsafe-hooks"] }

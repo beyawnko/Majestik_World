@@ -421,11 +421,11 @@ fn with_state(state: *const MwState, f: impl FnOnce(&MajestikCore) -> MwResult) 
 /// Advance the simulation by `dt_seconds` seconds.
 ///
 /// # Parameters
-/// * `dt_seconds` — must be finite, not negative, not exceed
-///   [`MAX_DELTA_TIME_SECONDS`], and must not be a positive subnormal. `+0.0`
-///   is accepted as a zero-length step while `-0.0` and all negative values are
-///   rejected to avoid ambiguous floating-point comparisons. Subnormal
-///   positives are rejected to avoid denormal slow paths on some CPUs.
+/// * `dt_seconds` — must be finite, non-negative, and not exceed
+///   [`MAX_DELTA_TIME_SECONDS`]. `+0.0` is accepted as a zero-length step while
+///   `-0.0` and negative values are rejected to avoid ambiguous floating-point
+///   comparisons. Positive subnormal values are allowed so integrators can
+///   represent very small time slices when necessary.
 ///
 /// # Safety
 /// `state` must be a pointer previously returned by [`mw_core_create`].
@@ -436,11 +436,11 @@ pub unsafe extern "C" fn mw_core_tick(
     dt_seconds: f32,
     update_terrain: MwBool,
 ) -> MwResult {
-    if !dt_seconds.is_finite()
-        || dt_seconds.is_sign_negative()
-        || dt_seconds > MAX_DELTA_TIME_SECONDS
-        || (dt_seconds > 0.0 && dt_seconds.is_subnormal())
-    {
+    if !dt_seconds.is_finite() || !(0.0..=MAX_DELTA_TIME_SECONDS).contains(&dt_seconds) {
+        return MwResult::InvalidDeltaTime;
+    }
+
+    if dt_seconds == 0.0 && dt_seconds.is_sign_negative() {
         return MwResult::InvalidDeltaTime;
     }
 
@@ -564,8 +564,24 @@ pub unsafe extern "C" fn mw_core_last_terrain_diff_take(
             return MwResult::BufferTooLarge;
         }
 
-        let diff = core.take_last_terrain_diff();
-        let ffi_diff = terrain_diff_into_mw(diff);
+        let mut ffi_diff = terrain_diff_into_mw(last.clone());
+
+        let new_failed = !last.new_chunks.is_empty() && ffi_diff.new_chunks.ptr.is_null();
+        let modified_failed =
+            !last.modified_chunks.is_empty() && ffi_diff.modified_chunks.ptr.is_null();
+        let removed_failed =
+            !last.removed_chunks.is_empty() && ffi_diff.removed_chunks.ptr.is_null();
+
+        if new_failed || modified_failed || removed_failed {
+            unsafe {
+                mw_terrain_chunk_buffer_free(&mut ffi_diff.new_chunks);
+                mw_terrain_chunk_buffer_free(&mut ffi_diff.modified_chunks);
+                mw_terrain_chunk_buffer_free(&mut ffi_diff.removed_chunks);
+            }
+            return MwResult::InternalError;
+        }
+
+        let _ = core.take_last_terrain_diff();
         unsafe { core::ptr::write(out_diff, ffi_diff) };
         MwResult::Success
     })
@@ -607,10 +623,16 @@ pub unsafe extern "C" fn mw_terrain_chunk_buffer_free(buffer: *mut MwTerrainChun
                     ));
                 }
             } else {
+                eprintln!(
+                    "WARNING: mw_terrain_chunk_buffer_free validation failed for owner ID {}. The \
+                     buffer was not freed to prevent memory corruption. This may indicate a bug \
+                     in the FFI caller.",
+                    owner_id
+                );
                 with_registry_mut("restore", |registry| {
                     if registry.insert(owner_id, entry).is_some() {
                         eprintln!(
-                            "WARNING: Buffer owner registry collision on restore for ID {}. This \
+                            "ERROR: Buffer owner registry collision on restore for ID {}. This \
                              indicates a buffer validation bug. Memory will be leaked to prevent \
                              use-after-free. Please report this issue with reproduction steps.",
                             owner_id
@@ -698,14 +720,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_subnormal_delta_time() {
+    fn allows_subnormal_delta_time() {
         let handle = create_state();
         let subnormal = f32::from_bits(1); // smallest positive subnormal
         let smallest_normal = f32::MIN_POSITIVE;
 
         assert_eq!(
             unsafe { mw_core_tick(handle, subnormal, 0) },
-            MwResult::InvalidDeltaTime
+            MwResult::Success
         );
         assert_eq!(
             unsafe { mw_core_tick(handle, -subnormal, 0) },
@@ -808,6 +830,42 @@ mod tests {
                     core.last_terrain_diff().new_chunks.len(),
                     MAX_CHUNK_COORDS + 1
                 );
+                MwResult::Success
+            }),
+            MwResult::Success
+        );
+
+        unsafe { mw_core_destroy(handle) };
+    }
+
+    #[test]
+    fn terrain_diff_take_preserves_data_on_buffer_failure() {
+        let handle = create_state();
+        let test_diff = TerrainDiff {
+            new_chunks: vec![TerrainChunkCoord::new(1, 2)],
+            modified_chunks: Vec::new(),
+            removed_chunks: Vec::new(),
+        };
+
+        assert_eq!(
+            with_state_mut(handle, |core| {
+                core.inject_last_terrain_diff_for_test(test_diff.clone());
+                MwResult::Success
+            }),
+            MwResult::Success
+        );
+
+        FORCE_REGISTER_FAILURE.store(true, Ordering::SeqCst);
+
+        let mut out = MwTerrainDiff::default();
+        assert_eq!(
+            unsafe { mw_core_last_terrain_diff_take(handle, &mut out) },
+            MwResult::InternalError
+        );
+
+        assert_eq!(
+            with_state_mut(handle, |core| {
+                assert_eq!(core.last_terrain_diff().new_chunks, test_diff.new_chunks);
                 MwResult::Success
             }),
             MwResult::Success

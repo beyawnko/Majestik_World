@@ -5,6 +5,7 @@ fn rustc_path_is_safe(rustc: &str) -> bool {
         return false;
     }
 
+    // Reject shell metacharacters while allowing Windows path separators.
     if rustc.chars().any(|ch| {
         matches!(
             ch,
@@ -20,7 +21,6 @@ fn rustc_path_is_safe(rustc: &str) -> bool {
                 | '\t'
                 | '"'
                 | '\''
-                | '\\'
                 | '*'
                 | '?'
                 | '['
@@ -39,7 +39,12 @@ fn rustc_path_is_safe(rustc: &str) -> bool {
         return false;
     }
 
-    if rustc.contains("..") || rustc.starts_with('-') {
+    let lower = rustc.to_ascii_lowercase();
+    if rustc.contains("..") || lower.contains("%2e%2e") {
+        return false;
+    }
+
+    if rustc.starts_with('-') {
         return false;
     }
 
@@ -47,10 +52,15 @@ fn rustc_path_is_safe(rustc: &str) -> bool {
     let bytes = rustc.as_bytes();
     let is_absolute_unix = rustc.starts_with('/');
     let is_absolute_windows = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
-        && (bytes[2] == b'/' || bytes[2] == b'\\')
-        && bytes[0].is_ascii_alphabetic();
-    let is_unc = rustc.starts_with("\\\\");
+        && matches!(bytes[2], b'/' | b'\\');
+    let is_unc = if bytes.len() >= 5 && bytes[0] == b'\\' && bytes[1] == b'\\' {
+        let third = bytes[2];
+        third != b'\\' && third != b'/' && bytes[2..].contains(&b'\\')
+    } else {
+        false
+    };
 
     if !(is_simple || is_absolute_unix || is_absolute_windows || is_unc) {
         return false;
@@ -123,15 +133,30 @@ mod tests {
     }
 
     #[test]
+    fn rejects_url_encoded_path_traversal() {
+        assert!(!rustc_path_is_safe("/usr/bin/%2e%2e/sh"));
+        assert!(!rustc_path_is_safe("%2E%2E/rustc"));
+        assert!(!rustc_path_is_safe("rustc/%2e%2E/evil"));
+    }
+
+    #[test]
     fn distinguishes_absolute_simple_and_relative_paths() {
         assert!(rustc_path_is_safe("rustc"));
         assert!(rustc_path_is_safe("/usr/bin/rustc"));
         assert!(rustc_path_is_safe("C:/Program Files/Rust/bin/rustc.exe"));
         assert!(rustc_path_is_safe(
-            "C\\\\Program Files\\Rust\\bin\\rustc.exe"
+            "C:\\Program Files\\Rust\\bin\\rustc.exe"
         ));
         assert!(!rustc_path_is_safe("bin/rustc"));
         assert!(!rustc_path_is_safe(".\\rustc.exe"));
+    }
+
+    #[test]
+    fn accepts_windows_backslash_paths() {
+        assert!(rustc_path_is_safe(
+            "C:\\Program Files\\Rust\\bin\\rustc.exe"
+        ));
+        assert!(rustc_path_is_safe("\\\\server\\share\\rustc.exe"));
     }
 
     #[test]

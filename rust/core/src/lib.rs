@@ -219,6 +219,12 @@ impl MajestikCore {
     /// the world outside the closure, eliminating a common class of
     /// use-after-free bugs when integrating with foreign runtimes.
     ///
+    /// **Owned data** includes primitive scalars (`i32`, `f64`), owned
+    /// containers (`String`, `Vec<T>`), and composite structs that contain only
+    /// owned fields. **Borrowed data** includes references (`&T`, `&str`,
+    /// `&[T]`), Specs component handles, iterators that borrow from the world,
+    /// or any type carrying a lifetime parameter tied to the ECS.
+    ///
     /// # Safety
     /// The provided closure must not retain references, Specs handles, or
     /// iterators that borrow from the `World` beyond this call, nor may it
@@ -275,15 +281,15 @@ impl MajestikCore {
     }
 }
 
-#[cfg(feature = "ffi-test-hooks")]
+#[cfg(feature = "test-only-unsafe-hooks")]
 impl MajestikCore {
     /// Inject a preconstructed terrain diff for test instrumentation.
     ///
     /// # Warning
-    /// This helper is gated behind the `ffi-test-hooks` feature and must never
-    /// be enabled in production builds. Forcing arbitrary diffs into the core
-    /// bypasses the normal capture pipeline and can desynchronise terrain state
-    /// if abused outside controlled tests.
+    /// This helper is gated behind the `test-only-unsafe-hooks` feature and
+    /// must never be enabled in production builds. Forcing arbitrary diffs
+    /// into the core bypasses the normal capture pipeline and can
+    /// desynchronise terrain state if abused outside controlled tests.
     pub fn inject_last_terrain_diff_for_test(&mut self, diff: TerrainDiff) {
         self.last_terrain_diff = diff;
     }

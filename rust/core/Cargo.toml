@@ -6,7 +6,7 @@ publish = false
 
 [features]
 default = []
-ffi-test-hooks = []
+test-only-unsafe-hooks = []
 
 [lints]
 workspace = true
