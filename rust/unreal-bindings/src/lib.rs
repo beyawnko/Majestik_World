@@ -11,15 +11,18 @@ use std::{
     time::Duration,
 };
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use majestic_world_core::{
     CoreInitConfig, GameMode, MajestikCore, TerrainChunkCoord, TerrainDiff, TickConfig,
 };
 
-/// Upper bound on a single simulation step's duration to defend against stalls
-/// and untrusted runtimes forwarding arbitrarily long pauses. Values above this
-/// can destabilise integrators and overflow downstream systems; 10s is chosen
-/// as a conservative ceiling for recovery after hitches while preserving
-/// safety.
+/// Upper bound on a single simulation step's duration to defend against stalls,
+/// denial-of-service attempts, and untrusted runtimes forwarding arbitrarily
+/// long pauses. Values above this can destabilise integrators, exhaust
+/// resources, and overflow downstream systems; 10s is chosen as a conservative
+/// ceiling for recovery after hitches while preserving safety.
 const MAX_DELTA_TIME_SECONDS: f32 = 10.0;
 
 /// Result codes returned by the FFI surface.
@@ -155,24 +158,51 @@ fn buffer_owner_registry() -> &'static Mutex<HashSet<usize>> {
     REGISTRY.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-fn register_buffer_owner(owner: *mut c_void) -> bool {
+#[cfg(test)]
+static FORCE_REGISTER_FAILURE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+static REGISTRY_POISON_LOGGED: AtomicBool = AtomicBool::new(false);
+
+fn log_registry_poison(operation: &'static str) {
+    #[cfg(test)]
+    {
+        REGISTRY_POISON_LOGGED.store(true, Ordering::SeqCst);
+    }
+
+    eprintln!("buffer owner registry mutex poisoned during {operation}; attempting recovery",);
+}
+
+fn with_registry_mut<R>(operation: &'static str, f: impl FnOnce(&mut HashSet<usize>) -> R) -> R {
+    match buffer_owner_registry().lock() {
+        Ok(mut guard) => f(&mut guard),
+        Err(poisoned) => {
+            log_registry_poison(operation);
+            let mut guard = poisoned.into_inner();
+            f(&mut guard)
+        },
+    }
+}
+
+fn register_buffer_owner(owner: *mut c_void) -> Result<(), ()> {
     if owner.is_null() {
-        return false;
+        return Err(());
+    }
+
+    #[cfg(test)]
+    if FORCE_REGISTER_FAILURE.swap(false, Ordering::SeqCst) {
+        return Err(());
     }
 
     let owner_addr = owner as usize;
 
-    match buffer_owner_registry().lock() {
-        Ok(mut guard) => {
-            guard.insert(owner_addr);
-            true
-        },
-        Err(poisoned) => {
-            let mut guard = poisoned.into_inner();
-            guard.insert(owner_addr);
-            true
-        },
-    }
+    with_registry_mut("register", |registry| {
+        if registry.insert(owner_addr) {
+            Ok(())
+        } else {
+            Err(())
+        }
+    })
 }
 
 fn take_buffer_owner(owner: *mut c_void) -> bool {
@@ -182,11 +212,11 @@ fn take_buffer_owner(owner: *mut c_void) -> bool {
 
     let owner_addr = owner as usize;
 
-    match buffer_owner_registry().lock() {
-        Ok(mut guard) => guard.remove(&owner_addr),
-        Err(poisoned) => poisoned.into_inner().remove(&owner_addr),
-    }
+    with_registry_mut("take", |registry| registry.remove(&owner_addr))
 }
+
+#[cfg(test)]
+fn buffer_owner_registry_len() -> usize { with_registry_mut("inspect", |registry| registry.len()) }
 
 /// Maximum number of terrain chunk coordinates returned in a single buffer.
 ///
@@ -226,21 +256,14 @@ impl MwTerrainChunkBuffer {
             let mut boxed_vec = Box::new(coords);
             let ptr = boxed_vec.as_mut_ptr();
             let len = boxed_vec.len();
-            let owner = Box::into_raw(boxed_vec) as *mut c_void;
-            if register_buffer_owner(owner) {
-                Self { ptr, len, owner }
-            } else {
-                // SAFETY: `owner` originates from `Box::into_raw` above and has not
-                // been exposed elsewhere, making this reconstruction sound.
-                unsafe {
-                    drop(Box::from_raw(owner as *mut Vec<MwTerrainChunkCoord>));
-                }
-                Self {
-                    ptr: std::ptr::null_mut(),
-                    len: 0,
-                    owner: std::ptr::null_mut(),
-                }
+            let owner_ptr = (&mut *boxed_vec) as *mut Vec<MwTerrainChunkCoord> as *mut c_void;
+
+            if register_buffer_owner(owner_ptr).is_err() {
+                return Self::default();
             }
+
+            let owner = Box::into_raw(boxed_vec) as *mut c_void;
+            Self { ptr, len, owner }
         }
     }
 }
@@ -476,12 +499,26 @@ pub unsafe extern "C" fn mw_core_last_terrain_diff_take(
 pub unsafe extern "C" fn mw_terrain_chunk_buffer_free(buffer: *mut MwTerrainChunkBuffer) {
     if let Some(buf) = unsafe { buffer.as_mut() } {
         let ptr_is_null = buf.ptr.is_null();
+        let len_is_zero = buf.len == 0;
 
-        if (ptr_is_null && buf.len != 0) || (!ptr_is_null && buf.len == 0) {
+        if buf.owner.is_null() {
+            buf.ptr = std::ptr::null_mut();
+            buf.len = 0;
             return;
         }
 
-        if buf.owner.is_null() {
+        if ptr_is_null || len_is_zero {
+            if take_buffer_owner(buf.owner) {
+                let owner = buf.owner as *mut Vec<MwTerrainChunkCoord>;
+                // SAFETY: `owner` originates from `Box::into_raw` in
+                // `MwTerrainChunkBuffer::from_vec` and has been removed from the
+                // registry above, guaranteeing this drop occurs at most once.
+                unsafe { drop(Box::from_raw(owner)) };
+            }
+
+            buf.ptr = std::ptr::null_mut();
+            buf.len = 0;
+            buf.owner = std::ptr::null_mut();
             return;
         }
 
@@ -553,6 +590,10 @@ mod tests {
             MwResult::InvalidDeltaTime
         );
         assert_eq!(unsafe { mw_core_tick(handle, 0.0, 0) }, MwResult::Success);
+        assert_eq!(
+            unsafe { mw_core_tick(handle, MAX_DELTA_TIME_SECONDS, 0) },
+            MwResult::Success
+        );
 
         unsafe { mw_core_destroy(handle) };
     }
@@ -709,19 +750,51 @@ mod tests {
         unsafe { mw_terrain_chunk_buffer_free(&mut buffer) };
 
         assert!(buffer.ptr.is_null());
-        assert_eq!(buffer.len, 1);
+        assert_eq!(buffer.len, 0);
         assert!(buffer.owner.is_null());
 
         unsafe { mw_terrain_chunk_buffer_free(&mut buffer) };
         assert!(buffer.ptr.is_null());
-        assert_eq!(buffer.len, 1);
+        assert_eq!(buffer.len, 0);
         assert!(buffer.owner.is_null());
+
+        let mut inconsistent_len =
+            MwTerrainChunkBuffer::from_vec(vec![MwTerrainChunkCoord { x: 5, y: 6 }]);
+        assert!(!inconsistent_len.owner.is_null());
+        inconsistent_len.len = 0;
+
+        unsafe { mw_terrain_chunk_buffer_free(&mut inconsistent_len) };
+        assert!(inconsistent_len.ptr.is_null());
+        assert_eq!(inconsistent_len.len, 0);
+        assert!(inconsistent_len.owner.is_null());
+
+        let mut inconsistent_ptr =
+            MwTerrainChunkBuffer::from_vec(vec![MwTerrainChunkCoord { x: -2, y: 3 }]);
+        inconsistent_ptr.ptr = ptr::null_mut();
+
+        unsafe { mw_terrain_chunk_buffer_free(&mut inconsistent_ptr) };
+        assert!(inconsistent_ptr.ptr.is_null());
+        assert_eq!(inconsistent_ptr.len, 0);
+        assert!(inconsistent_ptr.owner.is_null());
+    }
+
+    #[test]
+    fn buffer_registration_failure_returns_default() {
+        FORCE_REGISTER_FAILURE.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let buffer = MwTerrainChunkBuffer::from_vec(vec![MwTerrainChunkCoord { x: 9, y: 9 }]);
+        assert!(buffer.ptr.is_null());
+        assert_eq!(buffer.len, 0);
+        assert!(buffer.owner.is_null());
+        assert_eq!(buffer_owner_registry_len(), 0);
     }
 
     #[test]
     fn take_buffer_owner_recovers_from_poison() {
         let owner = Box::into_raw(Box::new(Vec::<MwTerrainChunkCoord>::new())) as *mut c_void;
-        assert!(register_buffer_owner(owner));
+        assert!(register_buffer_owner(owner).is_ok());
+
+        REGISTRY_POISON_LOGGED.store(false, std::sync::atomic::Ordering::SeqCst);
 
         let barrier = Arc::new(Barrier::new(2));
         let waiter = barrier.clone();
@@ -735,6 +808,7 @@ mod tests {
         let _ = handle.join();
 
         assert!(take_buffer_owner(owner));
+        assert!(REGISTRY_POISON_LOGGED.swap(false, std::sync::atomic::Ordering::SeqCst));
 
         unsafe {
             drop(Box::from_raw(owner as *mut Vec<MwTerrainChunkCoord>));

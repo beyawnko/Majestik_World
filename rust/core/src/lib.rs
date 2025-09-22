@@ -47,16 +47,11 @@ impl TerrainDiff {
         fn collect_chunks<'a>(
             iter: impl Iterator<Item = &'a vek::Vec2<i32>>,
         ) -> Vec<TerrainChunkCoord> {
-            let mut seen = HashSet::new();
-            let mut coords = Vec::new();
-
-            for pos in iter {
-                let coord = TerrainChunkCoord::new(pos.x, pos.y);
-                if seen.insert(coord) {
-                    coords.push(coord);
-                }
-            }
-
+            let mut coords: Vec<_> = iter
+                .map(|pos| TerrainChunkCoord::new(pos.x, pos.y))
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
             coords.sort();
             coords
         }
@@ -217,21 +212,6 @@ impl MajestikCore {
     /// Read the accumulated program time in seconds.
     pub fn program_time_seconds(&self) -> f64 { self.state.ecs().read_resource::<ProgramTime>().0 }
 
-    /// Provide shared access to the underlying ECS world for read-only queries.
-    ///
-    /// # Safety
-    /// The `visitor` closure must not store references to any world data beyond
-    /// the scope of this call. Doing so would allow use-after-free when the
-    /// `World` is next mutated by the simulation. Prefer [`query_world_owned`]
-    /// when the result can be materialised as owned data.
-    #[deprecated(
-        note = "Use query_world_owned to return owned data and avoid leaking references across \
-                FFI boundaries"
-    )]
-    pub fn visit_world<R>(&self, visitor: impl FnOnce(&World) -> R) -> R {
-        visitor(self.state.ecs())
-    }
-
     /// Run a read-only ECS query that must return owned data.
     ///
     /// By constraining the return type to `Send + 'static`, this helper
@@ -265,6 +245,12 @@ impl MajestikCore {
 #[cfg(feature = "ffi-test-hooks")]
 impl MajestikCore {
     /// Inject a preconstructed terrain diff for test instrumentation.
+    ///
+    /// # Safety
+    /// This helper is gated behind the `ffi-test-hooks` feature and must never
+    /// be enabled in production builds. Forcing arbitrary diffs into the core
+    /// bypasses the normal capture pipeline and can desynchronise terrain state
+    /// if abused outside controlled tests.
     pub fn inject_last_terrain_diff_for_test(&mut self, diff: TerrainDiff) {
         self.last_terrain_diff = diff;
     }
@@ -355,14 +341,6 @@ mod tests {
         let diff = core.take_last_terrain_diff();
         assert_eq!(diff.modified_chunks, vec![TerrainChunkCoord::new(7, -1)]);
         assert!(core.take_last_terrain_diff().is_empty());
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn visit_world_provides_read_only_queries() {
-        let core = MajestikCore::new(CoreInitConfig::default()).expect("core initialises");
-        let time_from_visit = core.visit_world(|world| world.read_resource::<Time>().0);
-        assert_eq!(time_from_visit, core.time_seconds());
     }
 
     #[test]
