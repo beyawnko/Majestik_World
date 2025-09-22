@@ -41,16 +41,18 @@ pub struct TerrainDiff {
 impl TerrainDiff {
     /// Build a diff from the provided terrain change sets, deduplicating chunk
     /// coordinates and returning them in a deterministic sorted order. This
-    /// guarantees the FFI surface never reports duplicate entries while
-    /// incurring `O(n log n)` tree insertions for large updates.
+    /// guarantees the FFI surface never reports duplicate entries while using
+    /// an in-place sort followed by `dedup()` to avoid extra allocations.
     fn from_terrain_changes(changes: &TerrainChanges) -> Self {
         fn collect_chunks<'a>(
             iter: impl Iterator<Item = &'a vek::Vec2<i32>>,
         ) -> Vec<TerrainChunkCoord> {
-            iter.map(|pos| TerrainChunkCoord::new(pos.x, pos.y))
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .collect()
+            let mut coords: Vec<_> = iter
+                .map(|pos| TerrainChunkCoord::new(pos.x, pos.y))
+                .collect();
+            coords.sort_unstable();
+            coords.dedup();
+            coords
         }
 
         Self {
