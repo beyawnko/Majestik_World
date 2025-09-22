@@ -4,7 +4,7 @@
 //! `docs/ue5_plugin_migration_plan.md`, extracting a deterministic simulation
 //! interface that can be linked from external runtimes.
 
-use std::{collections::HashSet, fmt, sync::Arc, time::Duration};
+use std::{fmt, sync::Arc, time::Duration};
 
 use specs::{World, world::WorldExt};
 use veloren_common::{
@@ -42,18 +42,15 @@ impl TerrainDiff {
     /// Build a diff from the provided terrain change sets, deduplicating chunk
     /// coordinates and returning them in a deterministic sorted order. This
     /// guarantees the FFI surface never reports duplicate entries while
-    /// incurring an `O(n log n)` sort for large updates.
+    /// incurring `O(n log n)` tree insertions for large updates.
     fn from_terrain_changes(changes: &TerrainChanges) -> Self {
         fn collect_chunks<'a>(
             iter: impl Iterator<Item = &'a vek::Vec2<i32>>,
         ) -> Vec<TerrainChunkCoord> {
-            let mut coords: Vec<_> = iter
-                .map(|pos| TerrainChunkCoord::new(pos.x, pos.y))
-                .collect::<HashSet<_>>()
+            iter.map(|pos| TerrainChunkCoord::new(pos.x, pos.y))
+                .collect::<std::collections::BTreeSet<_>>()
                 .into_iter()
-                .collect();
-            coords.sort();
-            coords
+                .collect()
         }
 
         Self {

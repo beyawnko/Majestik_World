@@ -364,7 +364,10 @@ pub unsafe extern "C" fn mw_core_tick(
     dt_seconds: f32,
     update_terrain: MwBool,
 ) -> MwResult {
-    if !dt_seconds.is_finite() || !(0.0..=MAX_DELTA_TIME_SECONDS).contains(&dt_seconds) {
+    if !dt_seconds.is_finite()
+        || !(0.0..=MAX_DELTA_TIME_SECONDS).contains(&dt_seconds)
+        || (dt_seconds != 0.0 && !dt_seconds.is_normal())
+    {
         return MwResult::InvalidDeltaTime;
     }
 
@@ -498,38 +501,13 @@ pub unsafe extern "C" fn mw_core_last_terrain_diff_take(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mw_terrain_chunk_buffer_free(buffer: *mut MwTerrainChunkBuffer) {
     if let Some(buf) = unsafe { buffer.as_mut() } {
-        let ptr_is_null = buf.ptr.is_null();
-        let len_is_zero = buf.len == 0;
-
-        if buf.owner.is_null() {
-            buf.ptr = std::ptr::null_mut();
-            buf.len = 0;
-            return;
-        }
-
-        if ptr_is_null || len_is_zero {
-            if take_buffer_owner(buf.owner) {
-                let owner = buf.owner as *mut Vec<MwTerrainChunkCoord>;
-                // SAFETY: `owner` originates from `Box::into_raw` in
-                // `MwTerrainChunkBuffer::from_vec` and has been removed from the
-                // registry above, guaranteeing this drop occurs at most once.
-                unsafe { drop(Box::from_raw(owner)) };
-            }
-
-            buf.ptr = std::ptr::null_mut();
-            buf.len = 0;
-            buf.owner = std::ptr::null_mut();
-            return;
-        }
-
-        if take_buffer_owner(buf.owner) {
+        if !buf.owner.is_null() && take_buffer_owner(buf.owner) {
             let owner = buf.owner as *mut Vec<MwTerrainChunkCoord>;
             // SAFETY: `owner` originates from `Box::into_raw` in
             // `MwTerrainChunkBuffer::from_vec` and has been removed from the
             // registry above, guaranteeing this drop occurs at most once.
             unsafe { drop(Box::from_raw(owner)) };
         }
-
         buf.ptr = std::ptr::null_mut();
         buf.len = 0;
         buf.owner = std::ptr::null_mut();
@@ -593,6 +571,23 @@ mod tests {
         assert_eq!(
             unsafe { mw_core_tick(handle, MAX_DELTA_TIME_SECONDS, 0) },
             MwResult::Success
+        );
+
+        unsafe { mw_core_destroy(handle) };
+    }
+
+    #[test]
+    fn rejects_subnormal_delta_time() {
+        let handle = create_state();
+        let subnormal = f32::from_bits(1); // smallest positive subnormal
+
+        assert_eq!(
+            unsafe { mw_core_tick(handle, subnormal, 0) },
+            MwResult::InvalidDeltaTime
+        );
+        assert_eq!(
+            unsafe { mw_core_tick(handle, -subnormal, 0) },
+            MwResult::InvalidDeltaTime
         );
 
         unsafe { mw_core_destroy(handle) };
