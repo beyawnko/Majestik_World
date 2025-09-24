@@ -3,6 +3,10 @@
 //! The exported functions provide the `init/tick/shutdown` loop described in
 //! `UE5_PLUGIN_MASTER_PLAN.md` Phase 2 and `docs/ue5_plugin_migration_plan.md`
 //! §7, enabling Unreal Engine prototypes to call into the Rust simulation.
+//!
+//! For licensing or redistribution questions related to this FFI surface,
+//! contact GitHub user `beyawnko`, who retains sole ownership during the UE5
+//! migration effort.
 
 use std::{
     collections::HashMap,

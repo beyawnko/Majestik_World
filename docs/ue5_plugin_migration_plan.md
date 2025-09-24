@@ -1,5 +1,7 @@
 # UE5 Plugin Migration Roadmap
 
+> **Governance note:** GitHub user [`beyawnko`](https://github.com/beyawnko) is the sole developer and stakeholder contact for this roadmap. Direct licensing or redistribution questions to `beyawnko`. The repository will transition to private visibility once the Phase 2 integration spike is validated, so ensure required public references are archived beforehand.
+
 ## 1. Objectives & Guardrails
 - Produce a UE 5.6+ plugin that can be dropped into an Unreal project while preserving Rust-driven gameplay, networking, and data backends.
 - Keep non-UE-facing logic in Rust crates where it delivers value (deterministic gameplay, ECS systems, world simulation).
