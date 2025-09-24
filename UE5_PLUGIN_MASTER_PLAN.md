@@ -79,5 +79,11 @@ This master plan establishes the end-to-end roadmap for transforming the existin
 3. **Rust static library prototype** — Produce a `rust/core` static library alongside generated headers using the selected FFI tooling, validated by a minimal UE or C harness that executes `mw_state_tick` and matches golden determinism snapshots. *Success criteria*: harness output checked into CI with pass/fail gating.
 4. **Documentation update plan** — Draft updates for SPECS.md/README.md/AGENTS.md outlining forthcoming workflow changes once prototypes succeed. *Success criteria*: merged documentation checklist that maps every artifact to an owner and milestone.
 
+## Implementation Task Tracker
+- [x] Expose chunk-level terrain diffs via `mw_core_last_terrain_diff_take`, including buffer ownership validation and leak-safe frees enforced by the registry-backed allocator.
+- [x] Harden FFI entry points with deterministic delta-time validation and explicit `MwResult` codes (`InvalidGameMode`, `BufferTooLarge`, `InvalidDeltaTime`) so UE callers receive actionable failures.
+- [ ] Wire the UE-side plugin prototype to consume the exported buffers and exercise the tick loop from an Unreal subsystem harness.
+- [ ] Expand CI with integration tests that link against the generated C headers and execute regression snapshots across Rust and UE builds.
+
 ---
 *This master plan will be revisited after Phase 2 prototypes validate the Rust ⇄ UE integration strategy, at which point documentation updates and downstream tasks will be scheduled.*

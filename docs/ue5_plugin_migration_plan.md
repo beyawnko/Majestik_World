@@ -157,3 +157,10 @@
 3. **Rust core prototype** — Prototype a `rust/core` static library exposing `mw_state_init/tick/shutdown` and validate linking from a minimal UE (or C) harness via the selected FFI tooling. *Success criteria*: automated test harness producing deterministic tick snapshots stored under CI artifacts.
 4. **Asset pipeline experiment** — Begin asset pipeline research for VOX → Nanite conversion (e.g., MagicaVoxel → FBX/GLTF → UE Nanite) while preserving collision data for Rust physics. *Success criteria*: documented pipeline prototype with sample asset conversion and comparison screenshots/metrics.
 5. **Documentation scheduling** — Schedule documentation updates once the base FFI layer and plugin skeleton stabilize (per instructions for `SPECS.md`, `README.md`, `AGENTS.md`). *Success criteria*: shared checklist mapping each document update to a milestone and owner within the migration tracker.
+
+## UE5 Migration Task List
+- [x] Finalise terrain diff streaming across the FFI boundary with leak-safe buffer ownership and explicit `MwResult` errors for oversize exports.
+- [x] Gate Unreal tick integration behind deterministic delta-time validation (finite, non-negative, capped at `MAX_DELTA_TIME_SECONDS`, subnormal-aware) so runaway frames are rejected.
+- [x] Add nightly-aware gating for `unsafe(no_mangle)` exports, keeping stable compilers on the safe code path while preserving nightly builds for ABI validation.
+- [ ] Generate and publish the C header set for the exported APIs alongside example UE subsystem glue.
+- [ ] Stand up UE-side harnesses that consume chunk diff buffers each frame and assert determinism against the Rust-only golden snapshots.

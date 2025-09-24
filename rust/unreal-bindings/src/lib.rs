@@ -1,3 +1,6 @@
+#![cfg_attr(ffi_use_unsafe_attributes, allow(stable_features))]
+#![cfg_attr(ffi_use_unsafe_attributes, feature(unsafe_attributes))]
+
 //! C ABI bindings for the Majestik World core library.
 //!
 //! The exported functions provide the `init/tick/shutdown` loop described in
