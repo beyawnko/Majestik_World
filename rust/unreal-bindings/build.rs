@@ -1,0 +1,166 @@
+fn rustc_path_is_safe(rustc: &str) -> bool {
+    if rustc.is_empty() || rustc.len() >= 4_096 {
+        return false;
+    }
+
+    // Reject shell metacharacters while allowing Windows path separators.
+    if rustc.chars().any(|ch| {
+        matches!(
+            ch,
+            ';' | '&'
+                | '|'
+                | '`'
+                | '$'
+                | '>'
+                | '<'
+                | '\n'
+                | '\r'
+                | '\0'
+                | '\t'
+                | '"'
+                | '\''
+                | '*'
+                | '?'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '('
+                | ')'
+                | '~'
+                | '#'
+                | '!'
+                | '%'
+                | '^'
+                | ' '
+        )
+    }) {
+        return false;
+    }
+
+    let lower = rustc.to_ascii_lowercase();
+    if rustc.contains("..") || lower.contains("%2e%2e") || lower.contains("%20") {
+        return false;
+    }
+
+    if rustc.starts_with('-') {
+        return false;
+    }
+
+    let is_simple = !rustc.contains('/') && !rustc.contains('\\');
+    let bytes = rustc.as_bytes();
+    let is_absolute_unix = rustc.starts_with('/');
+    let is_absolute_windows = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\');
+    let is_unc = if bytes.len() >= 5 && bytes[0] == b'\\' && bytes[1] == b'\\' {
+        let third = bytes[2];
+        third != b'\\' && third != b'/' && bytes[2..].contains(&b'\\')
+    } else {
+        false
+    };
+
+    if !(is_simple || is_absolute_unix || is_absolute_windows || is_unc) {
+        return false;
+    }
+
+    if is_simple && rustc.contains(':') {
+        return false;
+    }
+
+    true
+}
+
+fn main() {
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    if !rustc_path_is_safe(&rustc) {
+        panic!("refusing to execute rustc with potentially malicious path: {rustc}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rustc_path_is_safe;
+
+    #[test]
+    fn accepts_normal_rustc_paths() {
+        assert!(rustc_path_is_safe("/usr/bin/rustc"));
+        assert!(rustc_path_is_safe("C:/Rust/bin/rustc.exe"));
+    }
+
+    #[test]
+    fn rejects_paths_with_shell_metacharacters() {
+        assert!(!rustc_path_is_safe("/usr/bin/rustc;rm -rf /"));
+        assert!(!rustc_path_is_safe("rustc|malicious"));
+    }
+
+    #[test]
+    fn rejects_additional_dangerous_characters() {
+        assert!(!rustc_path_is_safe("rustc\0malicious"));
+        assert!(!rustc_path_is_safe("rustc\"evil"));
+        assert!(!rustc_path_is_safe("rustc'bad'"));
+        assert!(!rustc_path_is_safe("rustc\\inject"));
+        assert!(!rustc_path_is_safe("rustc*glob"));
+        assert!(!rustc_path_is_safe("rustc?wildcard"));
+        assert!(!rustc_path_is_safe("rustc[range]"));
+        assert!(!rustc_path_is_safe("rustc{expansion}"));
+        assert!(!rustc_path_is_safe("rustc(subshell)"));
+        assert!(!rustc_path_is_safe("rustc~home"));
+        assert!(!rustc_path_is_safe("rustc#fragment"));
+        assert!(!rustc_path_is_safe("rustc!history"));
+        assert!(!rustc_path_is_safe("rustc%env"));
+        assert!(!rustc_path_is_safe("rustc^caret"));
+    }
+
+    #[test]
+    fn rejects_path_traversal_attempts() {
+        assert!(!rustc_path_is_safe("/usr/bin/../../../bin/sh"));
+        assert!(!rustc_path_is_safe("../rustc"));
+        assert!(!rustc_path_is_safe("rustc/../evil"));
+    }
+
+    #[test]
+    fn rejects_url_encoded_path_traversal() {
+        assert!(!rustc_path_is_safe("/usr/bin/%2e%2e/sh"));
+        assert!(!rustc_path_is_safe("%2E%2E/rustc"));
+        assert!(!rustc_path_is_safe("rustc/%2e%2E/evil"));
+    }
+
+    #[test]
+    fn distinguishes_absolute_simple_and_relative_paths() {
+        assert!(rustc_path_is_safe("rustc"));
+        assert!(rustc_path_is_safe("/usr/bin/rustc"));
+        assert!(rustc_path_is_safe("C:/Rust/bin/rustc.exe"));
+        assert!(rustc_path_is_safe("C:\\Rust\\bin\\rustc.exe"));
+        assert!(!rustc_path_is_safe("bin/rustc"));
+        assert!(!rustc_path_is_safe(".\\rustc.exe"));
+    }
+
+    #[test]
+    fn accepts_windows_backslash_paths() {
+        assert!(rustc_path_is_safe("C:\\Rust\\bin\\rustc.exe"));
+        assert!(rustc_path_is_safe("\\\\server\\share\\rustc.exe"));
+    }
+
+    #[test]
+    fn rejects_space_characters_and_url_encoded_spaces() {
+        assert!(!rustc_path_is_safe("rustc malicious"));
+        assert!(!rustc_path_is_safe("/usr/bin/rustc evil"));
+        assert!(!rustc_path_is_safe("rustc%20inject"));
+        assert!(!rustc_path_is_safe("%20rustc"));
+        assert!(!rustc_path_is_safe("rustc%20%20evil"));
+    }
+
+    #[test]
+    fn rejects_flag_injection() {
+        assert!(!rustc_path_is_safe("-Zprint-link-args"));
+        assert!(!rustc_path_is_safe("--help"));
+    }
+
+    #[test]
+    fn rejects_oversized_paths() {
+        let oversized = "a".repeat(4_097);
+        assert!(!rustc_path_is_safe(&oversized));
+    }
+}

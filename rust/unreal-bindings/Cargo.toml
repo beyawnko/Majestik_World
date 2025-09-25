@@ -1,0 +1,18 @@
+[package]
+name = "majestic-world-ffi"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+build = "build.rs"
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+majestic-world-core = { path = "../core" }
+
+[dev-dependencies]
+majestic-world-core = { path = "../core", features = ["test-only-unsafe-hooks"] }

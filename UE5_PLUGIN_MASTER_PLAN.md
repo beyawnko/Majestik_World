@@ -3,6 +3,11 @@
 ## Purpose & Scope
 This master plan establishes the end-to-end roadmap for transforming the existing Majestik World (Veloren fork) workspace into a drop-in Unreal Engine 5.6+ plugin while preserving and extending our Rust-based gameplay foundation. It aligns engineering, content, and operations teams around shared milestones, defines guardrails for cross-language integration, and identifies the documentation and CI updates required once the base plan solidifies.
 
+## Governance & Contacts
+- **Plan owner:** GitHub user [`beyawnko`](https://github.com/beyawnko) serves as the sole developer and point of contact for stakeholder alignment across the UE5 migration effort.
+- **Licensing inquiries:** Direct all licensing or redistribution questions to `beyawnko`; they retain full ownership of the codebase and associated plans during the migration.
+- **Repository visibility:** The repository is scheduled to transition to private visibility once Phase 2 prototypes validate the integration strategy, so contributors should archive any required public artifacts ahead of that milestone.
+
 ## Strategic Objectives
 1. **Deliver a UE 5.6+ plugin** that exposes Majestik World's Rust gameplay, networking, and world simulation through Epic-sanctioned extension points.
 2. **Retain deterministic Rust systems** for non-UE-facing logic, exposing them via safe FFI bridges that follow Unreal plugin standards and are backed by automated regression tests that verify identical simulation outputs pre- and post-UE integration.
@@ -73,6 +78,12 @@ This master plan establishes the end-to-end roadmap for transforming the existin
 2. **Dependency abstraction spikes** — File and staff work items to decouple Rust gameplay crates from `winit`/`wgpu`/`cpal`. *Success criteria*: each dependency has a linked tracking issue with scope notes, estimates, and assigned engineers.
 3. **Rust static library prototype** — Produce a `rust/core` static library alongside generated headers using the selected FFI tooling, validated by a minimal UE or C harness that executes `mw_state_tick` and matches golden determinism snapshots. *Success criteria*: harness output checked into CI with pass/fail gating.
 4. **Documentation update plan** — Draft updates for SPECS.md/README.md/AGENTS.md outlining forthcoming workflow changes once prototypes succeed. *Success criteria*: merged documentation checklist that maps every artifact to an owner and milestone.
+
+## Implementation Task Tracker
+- [x] Expose chunk-level terrain diffs via `mw_core_last_terrain_diff_take`, including buffer ownership validation and leak-safe frees enforced by the registry-backed allocator.
+- [x] Harden FFI entry points with deterministic delta-time validation and explicit `MwResult` codes (`InvalidGameMode`, `BufferTooLarge`, `InvalidDeltaTime`) so UE callers receive actionable failures.
+- [ ] Wire the UE-side plugin prototype to consume the exported buffers and exercise the tick loop from an Unreal subsystem harness.
+- [ ] Expand CI with integration tests that link against the generated C headers and execute regression snapshots across Rust and UE builds.
 
 ---
 *This master plan will be revisited after Phase 2 prototypes validate the Rust ⇄ UE integration strategy, at which point documentation updates and downstream tasks will be scheduled.*

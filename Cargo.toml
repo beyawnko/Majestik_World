@@ -25,6 +25,8 @@ members = [
     "world",
     "network",
     "network/protocol",
+    "rust/core",
+    "rust/unreal-bindings",
 ]
 
 ### PACKAGE ###
