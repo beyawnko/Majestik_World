@@ -1,3 +1,6 @@
+// `unsafe(no_mangle)` became stable in Rust 1.82. We still enable the
+// historical feature gate when the build script detects a nightly/dev
+// compiler so older toolchains keep compiling without warnings.
 #![cfg_attr(ffi_use_unsafe_attributes, allow(stable_features))]
 #![cfg_attr(ffi_use_unsafe_attributes, feature(unsafe_attributes))]
 
