@@ -1,9 +1,3 @@
-// `unsafe(no_mangle)` became stable in Rust 1.82. We still enable the
-// historical feature gate when the build script detects a nightly/dev
-// compiler so older toolchains keep compiling without warnings.
-#![cfg_attr(ffi_use_unsafe_attributes, allow(stable_features))]
-#![cfg_attr(ffi_use_unsafe_attributes, feature(unsafe_attributes))]
-
 //! C ABI bindings for the Majestik World core library.
 //!
 //! The exported functions provide the `init/tick/shutdown` loop described in
@@ -247,7 +241,7 @@ fn register_buffer_owner(
 
     for _ in 0..MAX_BUFFER_ID_ATTEMPTS {
         let id = NEXT_BUFFER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if id == 0 {
+        if id == 0 || id == u64::MAX {
             continue;
         }
 
@@ -289,7 +283,11 @@ fn buffer_owner_registry_len() -> usize { with_registry_mut("inspect", |registry
 ///
 /// This guard prevents untrusted runtimes from forcing the allocator to
 /// reserve excessive memory when marshaling large diffs across the FFI
-/// boundary.
+/// boundary. The 65,536 (64k) cap keeps each coordinate array under roughly
+/// 512 KiB (8 bytes * 64k entries), which aligns with UE5 hitch-recovery
+/// budgets and the migration plan’s 256×256 chunk window per tick. Requests
+/// above this threshold return [`MwResult::BufferTooLarge`] so the caller can
+/// throttle input instead of destabilising the simulation.
 const MAX_CHUNK_COORDS: usize = 65_536;
 
 /// Buffer returned from terrain diff queries.
@@ -369,8 +367,7 @@ fn write_out_ptr<T>(out: *mut *mut T, value: Box<T>) -> MwResult {
 ///
 /// # Safety
 /// `out_config` must be a valid, writable pointer.
-#[cfg_attr(ffi_use_unsafe_attributes, unsafe(no_mangle))]
-#[cfg_attr(not(ffi_use_unsafe_attributes), no_mangle)]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mw_core_config_default(out_config: *mut MwCoreConfig) -> MwResult {
     if let Some(out) = unsafe { out_config.as_mut() } {
         *out = MwCoreConfig::default();
@@ -385,8 +382,7 @@ pub unsafe extern "C" fn mw_core_config_default(out_config: *mut MwCoreConfig) -
 /// # Safety
 /// `config` and `out_state` must be null or point to valid memory owned by the
 /// caller. Passing a null `config` pointer is allowed and uses default values.
-#[cfg_attr(ffi_use_unsafe_attributes, unsafe(no_mangle))]
-#[cfg_attr(not(ffi_use_unsafe_attributes), no_mangle)]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mw_core_create(
     config: *const MwCoreConfig,
     out_state: *mut *mut MwState,
@@ -406,8 +402,7 @@ pub unsafe extern "C" fn mw_core_create(
 ///
 /// # Safety
 /// `state` must be a pointer previously returned by [`mw_core_create`].
-#[cfg_attr(ffi_use_unsafe_attributes, unsafe(no_mangle))]
-#[cfg_attr(not(ffi_use_unsafe_attributes), no_mangle)]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mw_core_destroy(state: *mut MwState) {
     if !state.is_null() {
         drop(unsafe { Box::from_raw(state) });
@@ -439,8 +434,7 @@ fn with_state(state: *const MwState, f: impl FnOnce(&MajestikCore) -> MwResult) 
 ///
 /// # Safety
 /// `state` must be a pointer previously returned by [`mw_core_create`].
-#[cfg_attr(ffi_use_unsafe_attributes, unsafe(no_mangle))]
-#[cfg_attr(not(ffi_use_unsafe_attributes), no_mangle)]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mw_core_tick(
     state: *mut MwState,
     dt_seconds: f32,
@@ -490,8 +484,7 @@ fn terrain_diff_into_mw(diff: TerrainDiff) -> MwTerrainDiff {
 /// # Safety
 /// `state` must be a valid pointer returned by [`mw_core_create`], `out_time`
 /// must be writable.
-#[cfg_attr(ffi_use_unsafe_attributes, unsafe(no_mangle))]
-#[cfg_attr(not(ffi_use_unsafe_attributes), no_mangle)]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mw_core_time_seconds(
     state: *const MwState,
     out_time: *mut f64,
@@ -504,8 +497,7 @@ pub unsafe extern "C" fn mw_core_time_seconds(
 /// # Safety
 /// `state` must be a valid pointer returned by [`mw_core_create`], `out_time`
 /// must be writable.
-#[cfg_attr(ffi_use_unsafe_attributes, unsafe(no_mangle))]
-#[cfg_attr(not(ffi_use_unsafe_attributes), no_mangle)]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mw_core_program_time_seconds(
     state: *const MwState,
     out_time: *mut f64,
@@ -520,8 +512,7 @@ pub unsafe extern "C" fn mw_core_program_time_seconds(
 /// # Safety
 /// `state` must be a valid pointer returned by [`mw_core_create`], `out_time`
 /// must be writable.
-#[cfg_attr(ffi_use_unsafe_attributes, unsafe(no_mangle))]
-#[cfg_attr(not(ffi_use_unsafe_attributes), no_mangle)]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mw_core_time_of_day_seconds(
     state: *const MwState,
     out_time: *mut f64,
@@ -536,8 +527,7 @@ pub unsafe extern "C" fn mw_core_time_of_day_seconds(
 /// # Safety
 /// `state` must be a valid pointer returned by [`mw_core_create`], `out_mode`
 /// must be writable.
-#[cfg_attr(ffi_use_unsafe_attributes, unsafe(no_mangle))]
-#[cfg_attr(not(ffi_use_unsafe_attributes), no_mangle)]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mw_core_game_mode(
     state: *const MwState,
     out_mode: *mut MwGameMode,
@@ -555,8 +545,7 @@ pub unsafe extern "C" fn mw_core_game_mode(
 /// releasing buffers contained in `MwTerrainDiff` via
 /// [`mw_terrain_chunk_buffer_free`] before mutating or destroying the returned
 /// state handle.
-#[cfg_attr(ffi_use_unsafe_attributes, unsafe(no_mangle))]
-#[cfg_attr(not(ffi_use_unsafe_attributes), no_mangle)]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mw_core_last_terrain_diff_take(
     state: *mut MwState,
     out_diff: *mut MwTerrainDiff,
@@ -603,8 +592,7 @@ pub unsafe extern "C" fn mw_core_last_terrain_diff_take(
 /// # Safety
 /// `buffer` must either be null or point to a valid buffer that has not yet
 /// been freed.
-#[cfg_attr(ffi_use_unsafe_attributes, unsafe(no_mangle))]
-#[cfg_attr(not(ffi_use_unsafe_attributes), no_mangle)]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mw_terrain_chunk_buffer_free(buffer: *mut MwTerrainChunkBuffer) {
     if let Some(buf) = unsafe { buffer.as_mut() } {
         let owner_ptr = buf.owner;
@@ -1119,6 +1107,36 @@ mod tests {
         let owner_handle = (&mut *owner_box) as *mut Vec<MwTerrainChunkCoord> as *mut c_void;
 
         assert!(register_buffer_owner(owner_handle, std::ptr::null_mut(), 1).is_err());
+    }
+
+    #[test]
+    fn buffer_id_wraparound_handled() {
+        use std::sync::atomic::Ordering;
+
+        NEXT_BUFFER_ID.store(u64::MAX - 1, Ordering::SeqCst);
+
+        let mut owner_box = Box::new(vec![MwTerrainChunkCoord { x: 1, y: 1 }]);
+        let owner_handle = (&mut *owner_box) as *mut Vec<MwTerrainChunkCoord> as *mut c_void;
+        let owner_ptr = owner_box.as_mut_ptr();
+        let owner_len = owner_box.len();
+
+        let id = register_buffer_owner(owner_handle, owner_ptr, owner_len)
+            .expect("wraparound should still produce a valid id");
+        assert_ne!(id, 0);
+        assert_ne!(id, u64::MAX);
+
+        let _ = Box::into_raw(owner_box);
+
+        let entry = take_buffer_owner(id).expect("owner must be retrievable");
+        assert_eq!(entry.owner_addr, owner_handle as usize);
+
+        unsafe {
+            drop(Box::from_raw(
+                entry.owner_addr as *mut Vec<MwTerrainChunkCoord>,
+            ));
+        }
+
+        NEXT_BUFFER_ID.store(1, Ordering::SeqCst);
     }
 
     #[test]

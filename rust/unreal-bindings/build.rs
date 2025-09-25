@@ -1,5 +1,3 @@
-use std::process::Command;
-
 fn rustc_path_is_safe(rustc: &str) -> bool {
     if rustc.is_empty() || rustc.len() >= 4_096 {
         return false;
@@ -34,13 +32,14 @@ fn rustc_path_is_safe(rustc: &str) -> bool {
                 | '!'
                 | '%'
                 | '^'
+                | ' '
         )
     }) {
         return false;
     }
 
     let lower = rustc.to_ascii_lowercase();
-    if rustc.contains("..") || lower.contains("%2e%2e") {
+    if rustc.contains("..") || lower.contains("%2e%2e") || lower.contains("%20") {
         return false;
     }
 
@@ -74,20 +73,9 @@ fn rustc_path_is_safe(rustc: &str) -> bool {
 }
 
 fn main() {
-    println!("cargo:rustc-check-cfg=cfg(ffi_use_unsafe_attributes)");
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
     if !rustc_path_is_safe(&rustc) {
         panic!("refusing to execute rustc with potentially malicious path: {rustc}");
-    }
-    let channel = Command::new(rustc)
-        .arg("--version")
-        .output()
-        .ok()
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .unwrap_or_default();
-
-    if channel.contains("nightly") || channel.contains("dev") {
-        println!("cargo:rustc-cfg=ffi_use_unsafe_attributes");
     }
 }
 
@@ -98,7 +86,7 @@ mod tests {
     #[test]
     fn accepts_normal_rustc_paths() {
         assert!(rustc_path_is_safe("/usr/bin/rustc"));
-        assert!(rustc_path_is_safe("C:/Program Files/Rust/bin/rustc.exe"));
+        assert!(rustc_path_is_safe("C:/Rust/bin/rustc.exe"));
     }
 
     #[test]
@@ -143,20 +131,25 @@ mod tests {
     fn distinguishes_absolute_simple_and_relative_paths() {
         assert!(rustc_path_is_safe("rustc"));
         assert!(rustc_path_is_safe("/usr/bin/rustc"));
-        assert!(rustc_path_is_safe("C:/Program Files/Rust/bin/rustc.exe"));
-        assert!(rustc_path_is_safe(
-            "C:\\Program Files\\Rust\\bin\\rustc.exe"
-        ));
+        assert!(rustc_path_is_safe("C:/Rust/bin/rustc.exe"));
+        assert!(rustc_path_is_safe("C:\\Rust\\bin\\rustc.exe"));
         assert!(!rustc_path_is_safe("bin/rustc"));
         assert!(!rustc_path_is_safe(".\\rustc.exe"));
     }
 
     #[test]
     fn accepts_windows_backslash_paths() {
-        assert!(rustc_path_is_safe(
-            "C:\\Program Files\\Rust\\bin\\rustc.exe"
-        ));
+        assert!(rustc_path_is_safe("C:\\Rust\\bin\\rustc.exe"));
         assert!(rustc_path_is_safe("\\\\server\\share\\rustc.exe"));
+    }
+
+    #[test]
+    fn rejects_space_characters_and_url_encoded_spaces() {
+        assert!(!rustc_path_is_safe("rustc malicious"));
+        assert!(!rustc_path_is_safe("/usr/bin/rustc evil"));
+        assert!(!rustc_path_is_safe("rustc%20inject"));
+        assert!(!rustc_path_is_safe("%20rustc"));
+        assert!(!rustc_path_is_safe("rustc%20%20evil"));
     }
 
     #[test]
