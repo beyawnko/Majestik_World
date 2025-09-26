@@ -1,0 +1,3 @@
+# Ignore generated headers but keep any checked-in documentation.
+*.h
+!*.md
