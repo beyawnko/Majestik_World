@@ -18,4 +18,4 @@ majestic-world-core = { path = "../core" }
 majestic-world-core = { path = "../core", features = ["test-only-unsafe-hooks"] }
 
 [build-dependencies]
-cbindgen = "0.27"
+cbindgen = "=0.27.0"
