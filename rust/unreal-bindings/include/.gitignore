@@ -1,3 +1,2 @@
-# Ignore generated headers but keep the checked-in README.
+# Ignore generated headers placed alongside the checked-in README.
 *.h
-!README.md

@@ -4,6 +4,7 @@ use std::{
     fs,
     io::{Error as IoError, ErrorKind},
     path::{Path, PathBuf},
+    process,
 };
 
 use cbindgen::{Builder, Config, DocumentationLength, Language};
@@ -103,17 +104,20 @@ fn rustc_path_is_safe(rustc: &str) -> bool {
 fn main() {
     let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
     if !rustc_path_is_safe(&rustc) {
-        panic!("refusing to execute rustc with potentially malicious path: {rustc}");
+        eprintln!("Error: refusing to execute rustc with potentially malicious path: {rustc}");
+        process::exit(1);
     }
 
     if let Err(err) = generate_header() {
-        panic!("failed to generate C header: {err}");
+        eprintln!("Error: failed to generate C header: {err}");
+        process::exit(1);
     }
 }
 
 fn build_config(header_preamble: &str) -> Config {
     Config {
         language: Language::C,
+        include_guard: Some("MAJESTIC_WORLD_FFI_H".to_string()),
         pragma_once: true,
         cpp_compat: true,
         include_version: true,
@@ -221,9 +225,25 @@ fn write_if_changed(path: &Path, contents: &str) -> Result<(), Box<dyn Error>> {
 
     if needs_write {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+            ensure_directory(parent)?;
         }
         fs::write(path, contents)?;
+    }
+
+    Ok(())
+}
+
+fn ensure_directory(path: &Path) -> Result<(), Box<dyn Error>> {
+    if path.exists() {
+        if !path.is_dir() {
+            return Err(IoError::new(
+                ErrorKind::Other,
+                format!("Path exists but is not a directory: {}", path.display()),
+            )
+            .into());
+        }
+    } else {
+        fs::create_dir_all(path)?;
     }
 
     Ok(())
@@ -352,10 +372,13 @@ mod tests {
     }
 
     #[test]
-    fn config_uses_pragma_once_without_include_guard() {
+    fn config_uses_pragma_once_and_include_guard() {
         let config = build_config("test");
         assert!(config.pragma_once);
-        assert!(config.include_guard.is_none());
+        assert_eq!(
+            config.include_guard.as_deref(),
+            Some("MAJESTIC_WORLD_FFI_H")
+        );
     }
 
     #[test]
