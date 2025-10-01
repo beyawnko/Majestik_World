@@ -80,17 +80,22 @@ fn rustc_path_is_safe(rustc: &str) -> bool {
     }
 
     if !is_simple {
-        let inspected_path = match fs::canonicalize(rustc) {
-            Ok(path) => path,
-            Err(_) if is_absolute_windows || is_unc => PathBuf::from(rustc),
+        let inspected_path = PathBuf::from(rustc);
+
+        if let Ok(metadata) = fs::symlink_metadata(&inspected_path) {
+            if metadata.file_type().is_symlink() {
+                return false;
+            }
+        }
+
+        let metadata = match fs::metadata(&inspected_path) {
+            Ok(data) => data,
+            Err(_) if is_absolute_windows || is_unc => return false,
             Err(_) => return false,
         };
 
-        if let Some(path_str) = inspected_path.to_str() {
-            let lower_path = path_str.to_ascii_lowercase();
-            if lower_path.contains("..") || lower_path.contains("%2e%2e") {
-                return false;
-            }
+        if !metadata.is_file() {
+            return false;
         }
 
         let file_name = inspected_path
@@ -122,11 +127,13 @@ fn rustc_path_is_safe(rustc: &str) -> bool {
 fn main() {
     let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
     if !rustc_path_is_safe(&rustc) {
-        panic!("refusing to execute rustc with potentially malicious path: {rustc}");
+        eprintln!("Error: refusing to execute rustc with potentially malicious path: {rustc}");
+        std::process::exit(1);
     }
 
     if let Err(err) = generate_header() {
-        panic!("failed to generate C header: {err}");
+        eprintln!("Error: failed to generate C header: {err}");
+        std::process::exit(1);
     }
 }
 
@@ -172,27 +179,28 @@ fn generate_header() -> Result<(), Box<dyn Error>> {
  *     int main(void) {
  *         MwCoreConfig config;
  *         MwState *state = NULL;
+ *         MwResult result;
  *
- *         if (mw_core_config_default(&config) != MwResult_Success) {
- *             fprintf(stderr, "Failed to populate default config.\n");
+ *         result = mw_core_config_default(&config);
+ *         if (result != MwResult_Success) {
+ *             fprintf(stderr, "Failed to populate default config: %d\n", (int)result);
  *             return 1;
  *         }
  *
- *         if (mw_core_create(&config, &state) != MwResult_Success) {
- *             fprintf(stderr, "Failed to create Majestic World state.\n");
+ *         result = mw_core_create(&config, &state);
+ *         if (result != MwResult_Success) {
+ *             fprintf(stderr, "Failed to create Majestic World state: %d\n", (int)result);
  *             return 1;
  *         }
  *
- *         MwResult tick_result = mw_core_tick(state, 1.0f, 1);
- *         if (tick_result != MwResult_Success) {
- *             fprintf(stderr, "Tick failed: %d\n", (int)tick_result);
+ *         result = mw_core_tick(state, 1.0f, 1);
+ *         if (result != MwResult_Success) {
+ *             fprintf(stderr, "Tick failed: %d\n", (int)result);
  *         }
  *
- *         // Proper cleanup is essential
- *         if (state != NULL) {
- *             mw_core_destroy(state);
- *         }
- *         return tick_result == MwResult_Success ? 0 : 1;
+ *         // Always destroy the state exactly once when finished.
+ *         mw_core_destroy(state);
+ *         return result == MwResult_Success ? 0 : 1;
  *     }
  */"#;
 
@@ -202,16 +210,12 @@ fn generate_header() -> Result<(), Box<dyn Error>> {
         .with_config(config)
         .with_crate(&crate_dir)
         .generate()
-        .map_err(|err| IoError::new(ErrorKind::Other, format!("cbindgen failed: {err}")))?;
+        .map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
 
     let mut new_file_bytes = Vec::new();
     bindings.write(&mut new_file_bytes);
-    let new_contents = String::from_utf8(new_file_bytes).map_err(|err| {
-        IoError::new(
-            ErrorKind::InvalidData,
-            format!("header contained invalid UTF-8: {err}"),
-        )
-    })?;
+    let new_contents =
+        String::from_utf8(new_file_bytes).map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
 
     write_if_changed(&out_header_path, &new_contents)?;
 
@@ -447,6 +451,33 @@ mod tests {
         let _ = fs::remove_file(&symlink_path);
         unix_fs::symlink(&malicious_target, &symlink_path)
             .expect("failed to create symlink for rustc safety test");
+
+        let symlink_str = symlink_path
+            .to_str()
+            .expect("temp path should be valid UTF-8");
+        assert!(!rustc_path_is_safe(symlink_str));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validates_without_following_symlinks() {
+        use std::os::unix::fs as unix_fs;
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "mw_rustc_symlink_follow_test_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).expect("failed to create temp dir for symlink follow test");
+        let _guard = TempDirGuard(temp_dir.clone());
+
+        let real_rustc = temp_dir.join("real_rustc");
+        fs::write(&real_rustc, b"#!/bin/sh").expect("failed to create real rustc stub");
+
+        let symlink_path = temp_dir.join("rustc");
+        let _ = fs::remove_file(&symlink_path);
+        unix_fs::symlink(&real_rustc, &symlink_path)
+            .expect("failed to create symlink for rustc follow test");
 
         let symlink_str = symlink_path
             .to_str()
