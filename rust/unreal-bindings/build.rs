@@ -4,7 +4,6 @@ use std::{
     fs,
     io::{Error as IoError, ErrorKind},
     path::{Path, PathBuf},
-    process,
 };
 
 use cbindgen::{Builder, Config, DocumentationLength, Language};
@@ -87,14 +86,33 @@ fn rustc_path_is_safe(rustc: &str) -> bool {
             Err(_) => return false,
         };
 
+        if let Some(path_str) = inspected_path.to_str() {
+            let lower_path = path_str.to_ascii_lowercase();
+            if lower_path.contains("..") || lower_path.contains("%2e%2e") {
+                return false;
+            }
+        }
+
         let file_name = inspected_path
             .file_name()
             .and_then(|name| name.to_str())
             .map(|name| name.to_ascii_lowercase());
 
-        match file_name.as_deref() {
-            Some("rustc") | Some("rustc.exe") => {},
-            _ => return false,
+        let allowed_wrapper = match file_name.as_deref() {
+            Some(name)
+                if name == "rustc"
+                    || name == "rustc.exe"
+                    || name == "sccache"
+                    || name == "sccache.exe"
+                    || name.contains("rustc") =>
+            {
+                true
+            },
+            _ => false,
+        };
+
+        if !allowed_wrapper {
+            return false;
         }
     }
 
@@ -104,20 +122,17 @@ fn rustc_path_is_safe(rustc: &str) -> bool {
 fn main() {
     let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
     if !rustc_path_is_safe(&rustc) {
-        eprintln!("Error: refusing to execute rustc with potentially malicious path: {rustc}");
-        process::exit(1);
+        panic!("refusing to execute rustc with potentially malicious path: {rustc}");
     }
 
     if let Err(err) = generate_header() {
-        eprintln!("Error: failed to generate C header: {err}");
-        process::exit(1);
+        panic!("failed to generate C header: {err}");
     }
 }
 
 fn build_config(header_preamble: &str) -> Config {
     Config {
         language: Language::C,
-        include_guard: Some("MAJESTIC_WORLD_FFI_H".to_string()),
         pragma_once: true,
         cpp_compat: true,
         include_version: true,
@@ -173,6 +188,7 @@ fn generate_header() -> Result<(), Box<dyn Error>> {
  *             fprintf(stderr, "Tick failed: %d\n", (int)tick_result);
  *         }
  *
+ *         // Proper cleanup is essential
  *         if (state != NULL) {
  *             mw_core_destroy(state);
  *         }
@@ -186,17 +202,15 @@ fn generate_header() -> Result<(), Box<dyn Error>> {
         .with_config(config)
         .with_crate(&crate_dir)
         .generate()
-        .map_err(|err| -> Box<dyn Error> {
-            IoError::new(ErrorKind::Other, format!("cbindgen failed: {err}")).into()
-        })?;
+        .map_err(|err| IoError::new(ErrorKind::Other, format!("cbindgen failed: {err}")))?;
 
     let mut new_file_bytes = Vec::new();
     bindings.write(&mut new_file_bytes);
-    let new_contents = String::from_utf8(new_file_bytes).map_err(|err| -> Box<dyn Error> {
-        Box::new(IoError::new(
+    let new_contents = String::from_utf8(new_file_bytes).map_err(|err| {
+        IoError::new(
             ErrorKind::InvalidData,
             format!("header contained invalid UTF-8: {err}"),
-        ))
+        )
     })?;
 
     write_if_changed(&out_header_path, &new_contents)?;
@@ -279,7 +293,17 @@ mod tests {
     use std::{
         fs,
         io::{Error as IoError, ErrorKind},
+        path::PathBuf,
     };
+
+    struct TempDirGuard(PathBuf);
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let path = &self.0;
+            let _ = fs::remove_dir_all(path);
+        }
+    }
 
     #[test]
     fn accepts_normal_rustc_paths() {
@@ -296,6 +320,12 @@ mod tests {
     fn rejects_paths_with_shell_metacharacters() {
         assert!(!rustc_path_is_safe("/usr/bin/rustc;rm -rf /"));
         assert!(!rustc_path_is_safe("rustc|malicious"));
+    }
+
+    #[test]
+    fn allows_known_wrappers() {
+        assert!(rustc_path_is_safe("/usr/bin/sccache"));
+        assert!(rustc_path_is_safe("/usr/local/bin/rustc-wrapper"));
     }
 
     #[test]
@@ -372,13 +402,10 @@ mod tests {
     }
 
     #[test]
-    fn config_uses_pragma_once_and_include_guard() {
+    fn config_uses_pragma_once_without_include_guard() {
         let config = build_config("test");
         assert!(config.pragma_once);
-        assert_eq!(
-            config.include_guard.as_deref(),
-            Some("MAJESTIC_WORLD_FFI_H")
-        );
+        assert!(config.include_guard.is_none());
     }
 
     #[test]
@@ -389,6 +416,7 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&temp_dir);
         fs::create_dir_all(&temp_dir).expect("failed to create temp dir");
+        let _guard = TempDirGuard(temp_dir.clone());
 
         let blocking_path = temp_dir.join("not_a_directory");
         fs::write(&blocking_path, "marker").expect("failed to create blocking file");
@@ -399,8 +427,6 @@ mod tests {
             .downcast::<IoError>()
             .expect("expected io::Error from write failure");
         assert_eq!(io_err.kind(), ErrorKind::Other);
-
-        fs::remove_dir_all(&temp_dir).expect("failed to cleanup temp dir");
     }
 
     #[cfg(unix)]
@@ -412,6 +438,7 @@ mod tests {
             std::env::temp_dir().join(format!("mw_rustc_symlink_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp_dir);
         fs::create_dir_all(&temp_dir).expect("failed to create temp dir for symlink test");
+        let _guard = TempDirGuard(temp_dir.clone());
 
         let malicious_target = temp_dir.join("not_rustc");
         fs::write(&malicious_target, b"#!/bin/sh").expect("failed to create malicious target");
@@ -425,7 +452,10 @@ mod tests {
             .to_str()
             .expect("temp path should be valid UTF-8");
         assert!(!rustc_path_is_safe(symlink_str));
+    }
 
-        fs::remove_dir_all(&temp_dir).expect("failed to clean up symlink test temp dir");
+    #[test]
+    fn rejects_suspicious_canonical_paths() {
+        assert!(!rustc_path_is_safe("/tmp/../../../bin/sh"));
     }
 }

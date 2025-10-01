@@ -1,2 +1,2 @@
-# Ignore generated headers placed alongside the checked-in README.
-*.h
+# Ignore generated header placed alongside the checked-in README.
+majestic_world_ffi.h
