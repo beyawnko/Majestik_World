@@ -8,6 +8,8 @@ use std::{
 
 use cbindgen::{Builder, Config, DocumentationLength, Language};
 
+const HEADER_FILENAME: &str = "majestic_world_ffi.h";
+
 fn rustc_path_is_safe(rustc: &str) -> bool {
     if rustc.is_empty() || rustc.len() >= 4_096 {
         return false;
@@ -82,6 +84,8 @@ fn rustc_path_is_safe(rustc: &str) -> bool {
     if !is_simple {
         let inspected_path = PathBuf::from(rustc);
 
+        // Check for symlinks before performing any other filesystem operations to
+        // avoid time-of-check/time-of-use races.
         if let Ok(metadata) = fs::symlink_metadata(&inspected_path) {
             if metadata.file_type().is_symlink() {
                 return false;
@@ -90,6 +94,12 @@ fn rustc_path_is_safe(rustc: &str) -> bool {
 
         let metadata = match fs::metadata(&inspected_path) {
             Ok(data) => data,
+            Err(ref err) if err.kind() == ErrorKind::PermissionDenied => {
+                // Treat permission errors as suspicious because the target may
+                // have changed between the symlink inspection and metadata
+                // retrieval.
+                return false;
+            },
             Err(_) if is_absolute_windows || is_unc => return false,
             Err(_) => return false,
         };
@@ -162,8 +172,7 @@ fn generate_header() -> Result<(), Box<dyn Error>> {
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     let generated_include_dir = out_dir.join("include");
 
-    let header_filename = "majestic_world_ffi.h";
-    let out_header_path = generated_include_dir.join(header_filename);
+    let out_header_path = generated_include_dir.join(HEADER_FILENAME);
     let crate_include_dir = crate_dir.join("include");
     let header_preamble = r#"/*
  * Majestic World FFI (auto-generated).
@@ -209,20 +218,18 @@ fn generate_header() -> Result<(), Box<dyn Error>> {
     let bindings = Builder::new()
         .with_config(config)
         .with_crate(&crate_dir)
-        .generate()
-        .map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
+        .generate()?;
 
     let mut new_file_bytes = Vec::new();
     bindings.write(&mut new_file_bytes);
-    let new_contents =
-        String::from_utf8(new_file_bytes).map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
+    let new_contents = String::from_utf8(new_file_bytes)?;
 
     write_if_changed(&out_header_path, &new_contents)?;
 
     if let Err(err) =
-        try_write_repository_header(&crate_include_dir, header_filename, &new_contents)
+        try_write_repository_header(&crate_include_dir, HEADER_FILENAME, &new_contents)
     {
-        let crate_header_path = crate_include_dir.join(header_filename);
+        let crate_header_path = crate_include_dir.join(HEADER_FILENAME);
         println!(
             "cargo:warning=Failed to update checked-in header copy at {}: {err}",
             crate_header_path.display()
@@ -237,7 +244,7 @@ fn write_if_changed(path: &Path, contents: &str) -> Result<(), Box<dyn Error>> {
         Ok(existing) => existing != contents,
         Err(err) => match err.kind() {
             ErrorKind::NotFound => true,
-            _ => return Err(Box::new(err)),
+            _ => return Err(err.into()),
         },
     };
 
@@ -274,17 +281,6 @@ fn try_write_repository_header(
 ) -> Result<(), Box<dyn Error>> {
     if !include_dir.exists() {
         return Ok(());
-    }
-
-    if !include_dir.is_dir() {
-        return Err(IoError::new(
-            ErrorKind::Other,
-            format!(
-                "Include directory path exists but is not a directory: {}",
-                include_dir.display()
-            ),
-        )
-        .into());
     }
 
     let path = include_dir.join(file_name);
