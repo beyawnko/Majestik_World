@@ -84,47 +84,41 @@ fn rustc_path_is_safe(rustc: &str) -> bool {
     if !is_simple {
         let inspected_path = PathBuf::from(rustc);
 
-        // Check for symlinks before performing any other filesystem operations to
-        // avoid time-of-check/time-of-use races.
-        if let Ok(metadata) = fs::symlink_metadata(&inspected_path) {
-            if metadata.file_type().is_symlink() {
-                return false;
-            }
-        }
-
-        let metadata = match fs::metadata(&inspected_path) {
+        // Capture metadata once to avoid time-of-check/time-of-use races.
+        let metadata = match fs::symlink_metadata(&inspected_path) {
             Ok(data) => data,
-            Err(ref err) if err.kind() == ErrorKind::PermissionDenied => {
-                // Treat permission errors as suspicious because the target may
-                // have changed between the symlink inspection and metadata
-                // retrieval.
-                return false;
-            },
             Err(_) if is_absolute_windows || is_unc => return false,
             Err(_) => return false,
         };
 
-        if !metadata.is_file() {
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
             return false;
         }
 
-        let file_name = inspected_path
+        let allowed_wrapper = inspected_path
             .file_name()
             .and_then(|name| name.to_str())
-            .map(|name| name.to_ascii_lowercase());
-
-        let allowed_wrapper = match file_name.as_deref() {
-            Some(name)
-                if name == "rustc"
-                    || name == "rustc.exe"
-                    || name == "sccache"
-                    || name == "sccache.exe"
-                    || name.contains("rustc") =>
-            {
-                true
-            },
-            _ => false,
-        };
+            .map(|name| {
+                let lower = name.to_ascii_lowercase();
+                matches!(
+                    lower.as_str(),
+                    "rustc"
+                        | "rustc.exe"
+                        | "sccache"
+                        | "sccache.exe"
+                        | "rustc-wrapper"
+                        | "rustc-wrapper.exe"
+                        | "rustc_wrapper"
+                        | "rustc_wrapper.exe"
+                        | "rustc-clif"
+                        | "rustc-clif.exe"
+                        | "rustc_driver"
+                        | "rustc_driver.exe"
+                ) || lower.starts_with("rustc-")
+                    || lower.starts_with("rustc_")
+                    || lower.ends_with("-rustc")
+            })
+            .unwrap_or(false);
 
         if !allowed_wrapper {
             return false;
@@ -137,13 +131,11 @@ fn rustc_path_is_safe(rustc: &str) -> bool {
 fn main() {
     let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
     if !rustc_path_is_safe(&rustc) {
-        eprintln!("Error: refusing to execute rustc with potentially malicious path: {rustc}");
-        std::process::exit(1);
+        panic!("refusing to execute rustc with potentially malicious path: {rustc}");
     }
 
     if let Err(err) = generate_header() {
-        eprintln!("Error: failed to generate C header: {err}");
-        std::process::exit(1);
+        panic!("failed to generate C header: {err}");
     }
 }
 
@@ -165,7 +157,8 @@ fn build_config(header_preamble: &str) -> Config {
 }
 
 fn generate_header() -> Result<(), Box<dyn Error>> {
-    println!("cargo:rerun-if-changed=src/");
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=Cargo.toml");
 
     let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
@@ -183,33 +176,40 @@ fn generate_header() -> Result<(), Box<dyn Error>> {
  * Example usage:
  *
  *     #include <stdio.h>
+ *     #include <stdlib.h>
  *     #include "majestic_world_ffi.h"
  *
  *     int main(void) {
  *         MwCoreConfig config;
  *         MwState *state = NULL;
- *         MwResult result;
+ *         MwResult result = MwResult_Success;
+ *         int exit_code = EXIT_SUCCESS;
  *
  *         result = mw_core_config_default(&config);
  *         if (result != MwResult_Success) {
  *             fprintf(stderr, "Failed to populate default config: %d\n", (int)result);
- *             return 1;
+ *             exit_code = EXIT_FAILURE;
+ *             goto cleanup;
  *         }
  *
  *         result = mw_core_create(&config, &state);
  *         if (result != MwResult_Success) {
  *             fprintf(stderr, "Failed to create Majestic World state: %d\n", (int)result);
- *             return 1;
+ *             exit_code = EXIT_FAILURE;
+ *             goto cleanup;
  *         }
  *
  *         result = mw_core_tick(state, 1.0f, 1);
  *         if (result != MwResult_Success) {
  *             fprintf(stderr, "Tick failed: %d\n", (int)result);
+ *             exit_code = EXIT_FAILURE;
  *         }
  *
- *         // Always destroy the state exactly once when finished.
- *         mw_core_destroy(state);
- *         return result == MwResult_Success ? 0 : 1;
+ *     cleanup:
+ *         if (state != NULL) {
+ *             mw_core_destroy(state);
+ *         }
+ *         return exit_code;
  *     }
  */"#;
 
