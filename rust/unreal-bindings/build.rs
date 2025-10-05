@@ -3,7 +3,7 @@ use std::{
     error::Error,
     fs,
     io::{Error as IoError, ErrorKind},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use cbindgen::{Builder, Config, DocumentationLength, Language};
@@ -93,15 +93,71 @@ fn get_header_filename() -> String {
     }
 }
 
-// NOTE: We purposefully keep `rustc_path_is_safe` focused on rejecting
-// obviously malicious *path strings* instead of interrogating filesystem
-// metadata. Per Rust security guidance (e.g., CVE-2022-21658), performing a
-// separate `stat`/`symlink_metadata` check prior to execution introduces a
-// time-of-check/time-of-use race where an attacker can swap the executable
-// between validation and use. Cargo will attempt to execute the compiler
-// immediately after this function, so we only filter clearly dangerous
-// characters and traversal attempts here and let the `rustc` invocation surface
-// any filesystem failures.
+fn decode_hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn contains_forbidden_percent_encoding(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+
+    while index + 2 < bytes.len() {
+        if bytes[index] != b'%' {
+            index += 1;
+            continue;
+        }
+
+        let high = match decode_hex_digit(bytes[index + 1]) {
+            Some(value) => value,
+            None => return true,
+        };
+        let low = match decode_hex_digit(bytes[index + 2]) {
+            Some(value) => value,
+            None => return true,
+        };
+        let decoded = (high << 4) | low;
+
+        match decoded {
+            b'.' | b'/' | b'\\' | b' ' | b'\t' | b'\n' | b'\r' => return true,
+            _ => {},
+        }
+
+        index += 3;
+    }
+
+    false
+}
+
+fn is_allowed_compiler_name(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+
+    matches!(
+        lower.as_str(),
+        "rustc"
+            | "rustc.exe"
+            | "rustc.bat"
+            | "rustc.cmd"
+            | "rustc_driver"
+            | "rustc_driver.exe"
+            | "rustc-wrapper"
+            | "rustc-wrapper.exe"
+            | "sccache"
+            | "sccache.exe"
+            | "ccache"
+            | "ccache.exe"
+    ) || lower.starts_with("rustc-")
+        || lower.starts_with("rustc_")
+}
+
+// NOTE: We validate both the raw path string and the canonicalised filesystem
+// location to defend against obvious traversal attacks (including symlink
+// chains) while still delegating race-condition handling to the actual `rustc`
+// invocation.
 fn rustc_path_is_safe(rustc: &str) -> bool {
     if rustc.is_empty() || rustc.len() >= 4_096 {
         return false;
@@ -142,12 +198,19 @@ fn rustc_path_is_safe(rustc: &str) -> bool {
         return false;
     }
 
-    let lower = rustc.to_ascii_lowercase();
-    if rustc.contains("..") || lower.contains("%2e%2e") || lower.contains("%20") {
+    if rustc.contains("..") || contains_forbidden_percent_encoding(rustc) {
         return false;
     }
 
     if rustc.starts_with('-') {
+        return false;
+    }
+
+    let path = Path::new(rustc);
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
         return false;
     }
 
@@ -173,6 +236,30 @@ fn rustc_path_is_safe(rustc: &str) -> bool {
         return false;
     }
 
+    if is_simple {
+        return is_allowed_compiler_name(rustc);
+    }
+
+    let inspected_path = match fs::canonicalize(path) {
+        Ok(path) => path,
+        Err(_) => return false,
+    };
+
+    let file_name = inspected_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase());
+
+    match file_name.as_deref() {
+        Some(name) if is_allowed_compiler_name(name) => {},
+        _ => return false,
+    }
+
+    match fs::metadata(&inspected_path) {
+        Ok(metadata) if metadata.is_file() => {},
+        _ => return false,
+    }
+
     true
 }
 
@@ -191,6 +278,7 @@ fn build_config(header_preamble: &str) -> Config {
     Config {
         language: Language::C,
         pragma_once: true,
+        include_guard: None,
         cpp_compat: true,
         include_version: true,
         autogen_warning: Some(
@@ -204,11 +292,49 @@ fn build_config(header_preamble: &str) -> Config {
     }
 }
 
+fn emit_rerun_directives(crate_dir: &Path) -> Result<(), Box<dyn Error>> {
+    let build_script = crate_dir.join("build.rs");
+    println!("cargo:rerun-if-changed={}", build_script.display());
+
+    let manifest = crate_dir.join("Cargo.toml");
+    println!("cargo:rerun-if-changed={}", manifest.display());
+
+    emit_rerun_for_sources(&crate_dir.join("src"))?;
+
+    Ok(())
+}
+
+fn emit_rerun_for_sources(src_dir: &Path) -> Result<(), Box<dyn Error>> {
+    if !src_dir.exists() {
+        return Ok(());
+    }
+
+    let mut stack = vec![src_dir.to_path_buf()];
+    let mut files = Vec::new();
+
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                stack.push(path);
+            } else if path.extension().map_or(false, |ext| ext == "rs") {
+                files.push(path);
+            }
+        }
+    }
+
+    files.sort();
+    for file in files {
+        println!("cargo:rerun-if-changed={}", file.display());
+    }
+
+    Ok(())
+}
+
 fn generate_header() -> Result<(), Box<dyn Error>> {
     let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
-    println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=src/lib.rs");
-    println!("cargo:rerun-if-changed=Cargo.toml");
+    emit_rerun_directives(&crate_dir)?;
 
     let cbindgen_toml = crate_dir.join("cbindgen.toml");
     if cbindgen_toml.exists() {
@@ -237,10 +363,17 @@ fn generate_header() -> Result<(), Box<dyn Error>> {
     let bindings = Builder::new()
         .with_config(config)
         .with_crate(&crate_dir)
-        .generate()?;
+        .generate()
+        .map_err(|err| -> Box<dyn Error> {
+            Box::new(IoError::new(
+                ErrorKind::Other,
+                format!("cbindgen failed to generate bindings: {err}"),
+            ))
+        })?;
 
     let mut new_file_bytes = Vec::new();
     bindings.write(&mut new_file_bytes);
+
     if new_file_bytes.is_empty() {
         return Err(IoError::new(
             ErrorKind::Other,
@@ -250,6 +383,14 @@ fn generate_header() -> Result<(), Box<dyn Error>> {
         .into());
     }
     let new_contents = String::from_utf8(new_file_bytes)?;
+    if new_contents.trim().is_empty() {
+        return Err(IoError::new(
+            ErrorKind::Other,
+            "cbindgen produced an empty header; ensure FFI exports are marked #[no_mangle] and \
+             declared extern \"C\"",
+        )
+        .into());
+    }
 
     write_if_changed(&out_header_path, &new_contents)?;
 
@@ -272,9 +413,16 @@ fn generate_header() -> Result<(), Box<dyn Error>> {
 fn write_if_changed(path: &Path, contents: &str) -> Result<(), Box<dyn Error>> {
     let needs_write = match fs::read_to_string(path) {
         Ok(existing) => existing != contents,
-        Err(err) => match err.kind() {
-            ErrorKind::NotFound => true,
-            _ => return Err(err.into()),
+        Err(err) => {
+            if err.kind() == ErrorKind::NotFound {
+                true
+            } else {
+                return Err(IoError::new(
+                    err.kind(),
+                    format!("failed to read existing file {}: {err}", path.display()),
+                )
+                .into());
+            }
         },
     };
 
@@ -360,9 +508,10 @@ mod tests {
     }
 
     #[test]
-    fn allows_known_wrappers() {
+    fn allows_common_wrappers() {
         assert!(rustc_path_is_safe("/usr/bin/sccache"));
         assert!(rustc_path_is_safe("/usr/local/bin/rustc-wrapper"));
+        assert!(rustc_path_is_safe("ccache"));
     }
 
     #[test]
@@ -395,6 +544,31 @@ mod tests {
         assert!(!rustc_path_is_safe("/usr/bin/%2e%2e/sh"));
         assert!(!rustc_path_is_safe("%2E%2E/rustc"));
         assert!(!rustc_path_is_safe("rustc/%2e%2E/evil"));
+        assert!(!rustc_path_is_safe("/usr%2e%2e/bin/sh"));
+        assert!(!rustc_path_is_safe("path/to/..%2f../evil"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_pointing_to_unexpected_binary() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("mw_build_symlink_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).expect("failed to create symlink test dir");
+        let _guard = TempDirGuard(temp_dir.clone());
+
+        let target = temp_dir.join("not_rustc");
+        fs::write(&target, b"echo not rustc").expect("failed to create target file");
+        let link_path = temp_dir.join("rustc");
+        symlink(&target, &link_path).expect("failed to create symlink");
+
+        let link_str = link_path
+            .to_str()
+            .expect("symlink path not valid UTF-8")
+            .to_string();
+        assert!(!rustc_path_is_safe(&link_str));
     }
 
     #[test]
