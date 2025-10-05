@@ -65,14 +65,29 @@ const HEADER_PREAMBLE_TEMPLATE: &str = r#"/*
  */"#;
 
 fn get_header_filename() -> String {
-    match env::var("MW_FFI_HEADER_NAME") {
+    const ENV_KEY: &str = "MW_FFI_HEADER_NAME";
+    match env::var(ENV_KEY) {
         Ok(value) => {
             let trimmed = value.trim();
             if trimmed.is_empty() {
-                HEADER_FILENAME.to_string()
-            } else {
-                trimmed.to_string()
+                return HEADER_FILENAME.to_string();
             }
+
+            let has_separator = trimmed.contains('/') || trimmed.contains('\\');
+            let has_h_extension = trimmed
+                .rsplit_once('.')
+                .map(|(_, ext)| ext.eq_ignore_ascii_case("h"))
+                .unwrap_or(false);
+
+            if has_separator || !has_h_extension {
+                println!(
+                    "cargo:warning=Ignored {ENV_KEY} value \"{trimmed}\": provide a bare filename \
+                     ending in .h"
+                );
+                return HEADER_FILENAME.to_string();
+            }
+
+            trimmed.to_string()
         },
         Err(_) => HEADER_FILENAME.to_string(),
     }
@@ -198,6 +213,14 @@ fn generate_header() -> Result<(), Box<dyn Error>> {
     let cbindgen_toml = crate_dir.join("cbindgen.toml");
     if cbindgen_toml.exists() {
         println!("cargo:rerun-if-changed={}", cbindgen_toml.display());
+        // Example cbindgen.toml options for UE integration:
+        //   language = "C"
+        //   include_guard = "MAJESTIC_WORLD_FFI_H"
+        //   pragma_once = true
+        //   documentation = true
+        //   include_version = true
+        // Consider enabling `namespaces` or `cpp_compat` when targeting UE
+        // modules that mix C and C++ translation units.
     }
 
     let header_filename = get_header_filename();
@@ -219,7 +242,12 @@ fn generate_header() -> Result<(), Box<dyn Error>> {
     let mut new_file_bytes = Vec::new();
     bindings.write(&mut new_file_bytes);
     if new_file_bytes.is_empty() {
-        return Err(IoError::new(ErrorKind::Other, "cbindgen produced an empty header").into());
+        return Err(IoError::new(
+            ErrorKind::Other,
+            "cbindgen produced an empty header; ensure FFI exports are marked #[no_mangle] and \
+             declared extern \"C\"",
+        )
+        .into());
     }
     let new_contents = String::from_utf8(new_file_bytes)?;
 
@@ -431,6 +459,9 @@ mod tests {
         const KEY: &str = "MW_FFI_HEADER_NAME";
         let original = env::var(KEY).ok();
 
+        env::remove_var(KEY);
+        assert_eq!(get_header_filename(), HEADER_FILENAME);
+
         env::set_var(KEY, "custom_ffi.h");
         assert_eq!(get_header_filename(), "custom_ffi.h");
 
@@ -438,8 +469,26 @@ mod tests {
             Some(value) => env::set_var(KEY, value),
             None => env::remove_var(KEY),
         }
+    }
 
+    #[test]
+    fn header_filename_validates_format() {
+        const KEY: &str = "MW_FFI_HEADER_NAME";
+        let original = env::var(KEY).ok();
+
+        env::set_var(KEY, "invalid_name");
         assert_eq!(get_header_filename(), HEADER_FILENAME);
+
+        env::set_var(KEY, "../evil.h");
+        assert_eq!(get_header_filename(), HEADER_FILENAME);
+
+        env::set_var(KEY, "custom.h");
+        assert_eq!(get_header_filename(), "custom.h");
+
+        match original {
+            Some(value) => env::set_var(KEY, value),
+            None => env::remove_var(KEY),
+        }
     }
 
     #[test]
