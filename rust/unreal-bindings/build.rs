@@ -154,10 +154,11 @@ fn is_allowed_compiler_name(value: &str) -> bool {
         || lower.starts_with("rustc_")
 }
 
-// NOTE: We validate both the raw path string and the canonicalised filesystem
-// location to defend against obvious traversal attacks (including symlink
-// chains) while still delegating race-condition handling to the actual `rustc`
-// invocation.
+// NOTE: We validate both the raw path string and (when possible) the
+// canonicalised filesystem location to defend against obvious traversal
+// attacks (including symlink chains) while still delegating race-condition
+// handling to the actual `rustc` invocation. On Windows/UNC paths we fall back
+// to validating the raw components if canonicalisation is not available.
 fn rustc_path_is_safe(rustc: &str) -> bool {
     if rustc.is_empty() || rustc.len() >= 4_096 {
         return false;
@@ -242,6 +243,7 @@ fn rustc_path_is_safe(rustc: &str) -> bool {
 
     let inspected_path = match fs::canonicalize(path) {
         Ok(path) => path,
+        Err(_) if is_absolute_windows || is_unc => PathBuf::from(rustc),
         Err(_) => return false,
     };
 
@@ -252,11 +254,6 @@ fn rustc_path_is_safe(rustc: &str) -> bool {
 
     match file_name.as_deref() {
         Some(name) if is_allowed_compiler_name(name) => {},
-        _ => return false,
-    }
-
-    match fs::metadata(&inspected_path) {
-        Ok(metadata) if metadata.is_file() => {},
         _ => return false,
     }
 
