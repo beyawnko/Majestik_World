@@ -106,10 +106,14 @@ fn contains_forbidden_percent_encoding(value: &str) -> bool {
     let bytes = value.as_bytes();
     let mut index = 0;
 
-    while index + 2 < bytes.len() {
+    while index < bytes.len() {
         if bytes[index] != b'%' {
             index += 1;
             continue;
+        }
+
+        if index + 2 >= bytes.len() {
+            return true;
         }
 
         let high = match decode_hex_digit(bytes[index + 1]) {
@@ -191,7 +195,6 @@ fn rustc_path_is_safe(rustc: &str) -> bool {
                 | '~'
                 | '#'
                 | '!'
-                | '%'
                 | '^'
                 | ' '
         )
@@ -543,6 +546,13 @@ mod tests {
         assert!(!rustc_path_is_safe("rustc/%2e%2E/evil"));
         assert!(!rustc_path_is_safe("/usr%2e%2e/bin/sh"));
         assert!(!rustc_path_is_safe("path/to/..%2f../evil"));
+    }
+
+    #[test]
+    fn rejects_malformed_percent_sequences() {
+        assert!(!rustc_path_is_safe("rustc%"));
+        assert!(!rustc_path_is_safe("rustc%2"));
+        assert!(!rustc_path_is_safe("rustc%2G"));
     }
 
     #[cfg(unix)]
