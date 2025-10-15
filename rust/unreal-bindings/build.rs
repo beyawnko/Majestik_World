@@ -113,15 +113,11 @@ fn contains_forbidden_percent_encoding(value: &str) -> bool {
             continue;
         }
 
-        if index + 2 >= bytes.len() {
-            return true;
-        }
-
-        let high = match decode_hex_digit(bytes[index + 1]) {
+        let high = match bytes.get(index + 1).copied().and_then(decode_hex_digit) {
             Some(value) => value,
             None => return true,
         };
-        let low = match decode_hex_digit(bytes[index + 2]) {
+        let low = match bytes.get(index + 2).copied().and_then(decode_hex_digit) {
             Some(value) => value,
             None => return true,
         };
@@ -251,6 +247,35 @@ fn rustc_path_is_safe(rustc: &str) -> bool {
         Err(_) => return false,
     };
 
+    if let Some(parent) = inspected_path.parent() {
+        let parent_lower = parent.to_string_lossy().to_ascii_lowercase();
+        const ALLOWED_PREFIXES: &[&str] = &[
+            "/usr/bin",
+            "/usr/local/bin",
+            "/opt/",
+            "c:/rust",
+            "c:/program files",
+            "c:/users",
+            "c:\\rust",
+            "c:\\program files",
+            "c:\\users",
+        ];
+
+        let allowed = parent_lower.starts_with("\\\\")
+            || ALLOWED_PREFIXES
+                .iter()
+                .any(|prefix| parent_lower.starts_with(prefix))
+            || parent_lower.contains("/.cargo/bin")
+            || parent_lower.contains("\\.cargo\\bin")
+            || parent_lower.contains("/.rustup/toolchains")
+            || parent_lower.contains("\\.rustup\\toolchains")
+            || parent_lower.contains("program files");
+
+        if !allowed {
+            return false;
+        }
+    }
+
     let file_name = inspected_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -278,6 +303,8 @@ fn main() {
 fn build_config(header_preamble: &str) -> Config {
     Config {
         language: Language::C,
+        // Prefer `#pragma once` to avoid guard name collisions across generated
+        // headers while keeping include protection consistent across toolchains.
         pragma_once: true,
         include_guard: None,
         cpp_compat: true,
@@ -509,7 +536,16 @@ mod tests {
         env, fs,
         io::{Error as IoError, ErrorKind},
         path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
     };
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        env::temp_dir().join(format!("{prefix}_{:x}_{:x}", std::process::id(), timestamp))
+    }
 
     mod rustc_path_validation {
         use super::*;
@@ -577,6 +613,24 @@ mod tests {
             assert!(!rustc_path_is_safe("rustc%"));
             assert!(!rustc_path_is_safe("rustc%2"));
             assert!(!rustc_path_is_safe("rustc%2G"));
+            assert!(!rustc_path_is_safe("%"));
+        }
+
+        #[test]
+        fn allows_harmless_percent_sequences() {
+            let base = unique_temp_dir("mw_percent_test");
+            let cargo_bin = base.join(".cargo/bin");
+            fs::create_dir_all(&cargo_bin).expect("failed to create cargo bin directory");
+            let _guard = super::file_operations::TempDirGuard(base.clone());
+
+            let tool_path = cargo_bin.join("rustc%41");
+            fs::write(&tool_path, b"#!/bin/true\n").expect("failed to create dummy compiler");
+
+            let tool_str = tool_path
+                .to_str()
+                .expect("path not valid UTF-8")
+                .to_string();
+            assert!(rustc_path_is_safe(&tool_str));
         }
 
         #[cfg(unix)]
@@ -584,8 +638,7 @@ mod tests {
         fn rejects_symlink_pointing_to_unexpected_binary() {
             use std::os::unix::fs::symlink;
 
-            let temp_dir =
-                std::env::temp_dir().join(format!("mw_build_symlink_test_{}", std::process::id()));
+            let temp_dir = unique_temp_dir("mw_build_symlink_test");
             let _ = fs::remove_dir_all(&temp_dir);
             fs::create_dir_all(&temp_dir).expect("failed to create symlink test dir");
             let _guard = super::file_operations::TempDirGuard(temp_dir.clone());
@@ -646,6 +699,34 @@ mod tests {
         #[test]
         fn rejects_suspicious_canonical_paths() {
             assert!(!rustc_path_is_safe("/tmp/../../../bin/sh"));
+        }
+
+        #[test]
+        fn enforces_directory_allowlist() {
+            let allowed_root = unique_temp_dir("mw_allowlist_ok");
+            let allowed_bin = allowed_root.join(".cargo/bin");
+            fs::create_dir_all(&allowed_bin).expect("failed to create allowed bin directory");
+            let allowed_guard = super::file_operations::TempDirGuard(allowed_root.clone());
+            let allowed_path = allowed_bin.join("rustc");
+            fs::write(&allowed_path, b"#!/bin/true\n").expect("failed to create allowed tool");
+            let allowed_str = allowed_path
+                .to_str()
+                .expect("allowed path not UTF-8")
+                .to_string();
+            assert!(rustc_path_is_safe(&allowed_str));
+            drop(allowed_guard);
+
+            let disallowed_root = unique_temp_dir("mw_allowlist_blocked");
+            fs::create_dir_all(&disallowed_root).expect("failed to create disallowed dir");
+            let _disallowed_guard = super::file_operations::TempDirGuard(disallowed_root.clone());
+            let disallowed_path = disallowed_root.join("rustc");
+            fs::write(&disallowed_path, b"#!/bin/true\n")
+                .expect("failed to create disallowed tool");
+            let disallowed_str = disallowed_path
+                .to_str()
+                .expect("disallowed path not UTF-8")
+                .to_string();
+            assert!(!rustc_path_is_safe(&disallowed_str));
         }
     }
 
