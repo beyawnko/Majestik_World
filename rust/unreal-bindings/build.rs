@@ -3,7 +3,7 @@ use std::{
     error::Error,
     fs,
     io::{Error as IoError, ErrorKind},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 use cbindgen::{Builder, Config, DocumentationLength, Language};
@@ -94,200 +94,226 @@ fn get_header_filename() -> String {
     }
 }
 
-fn decode_hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
+/// Security-oriented helpers that validate toolchain execution paths before
+/// invoking `rustc`.
+mod security {
+    use std::{
+        fs,
+        path::{Component, Path, PathBuf},
+    };
+
+    use super::RUSTC_PATH_LENGTH_LIMIT;
+
+    fn decode_hex_digit(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
     }
-}
 
-fn contains_forbidden_percent_encoding(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    let mut index = 0;
+    fn contains_forbidden_percent_encoding(value: &str) -> bool {
+        let bytes = value.as_bytes();
+        let mut index = 0;
 
-    while index < bytes.len() {
-        if bytes[index] != b'%' {
-            index += 1;
-            continue;
+        while index < bytes.len() {
+            if bytes[index] != b'%' {
+                index += 1;
+                continue;
+            }
+
+            let remaining = bytes.len() - index;
+            if remaining <= 2 {
+                return true;
+            }
+
+            let high = match bytes.get(index + 1).copied().and_then(decode_hex_digit) {
+                Some(value) => value,
+                None => return true,
+            };
+            let low = match bytes.get(index + 2).copied().and_then(decode_hex_digit) {
+                Some(value) => value,
+                None => return true,
+            };
+            let decoded = (high << 4) | low;
+
+            match decoded {
+                b'.' | b'/' | b'\\' | b' ' | b'\t' | b'\n' | b'\r' => return true,
+                _ => {},
+            }
+
+            index += 3;
         }
 
-        let high = match bytes.get(index + 1).copied().and_then(decode_hex_digit) {
-            Some(value) => value,
-            None => return true,
-        };
-        let low = match bytes.get(index + 2).copied().and_then(decode_hex_digit) {
-            Some(value) => value,
-            None => return true,
-        };
-        let decoded = (high << 4) | low;
-
-        match decoded {
-            b'.' | b'/' | b'\\' | b' ' | b'\t' | b'\n' | b'\r' => return true,
-            _ => {},
-        }
-
-        index += 3;
-    }
-
-    false
-}
-
-fn is_allowed_compiler_name(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-
-    matches!(
-        lower.as_str(),
-        "rustc"
-            | "rustc.exe"
-            | "rustc.bat"
-            | "rustc.cmd"
-            | "rustc_driver"
-            | "rustc_driver.exe"
-            | "rustc-wrapper"
-            | "rustc-wrapper.exe"
-            | "sccache"
-            | "sccache.exe"
-            | "ccache"
-            | "ccache.exe"
-    ) || lower.starts_with("rustc-")
-        || lower.starts_with("rustc_")
-}
-
-// NOTE: We validate both the raw path string and (when possible) the
-// canonicalised filesystem location to defend against obvious traversal
-// attacks (including symlink chains) while still delegating race-condition
-// handling to the actual `rustc` invocation. On Windows/UNC paths we fall back
-// to validating the raw components if canonicalisation is not available.
-fn rustc_path_is_safe(rustc: &str) -> bool {
-    if rustc.is_empty() || rustc.len() >= RUSTC_PATH_LENGTH_LIMIT {
-        return false;
-    }
-
-    // Reject shell metacharacters while allowing Windows path separators.
-    if rustc.chars().any(|ch| {
-        matches!(
-            ch,
-            ';' | '&'
-                | '|'
-                | '`'
-                | '$'
-                | '>'
-                | '<'
-                | '\n'
-                | '\r'
-                | '\0'
-                | '\t'
-                | '"'
-                | '\''
-                | '*'
-                | '?'
-                | '['
-                | ']'
-                | '{'
-                | '}'
-                | '('
-                | ')'
-                | '~'
-                | '#'
-                | '!'
-                | '^'
-                | ' '
-        )
-    }) {
-        return false;
-    }
-
-    if rustc.contains("..") || contains_forbidden_percent_encoding(rustc) {
-        return false;
-    }
-
-    if rustc.starts_with('-') {
-        return false;
-    }
-
-    let path = Path::new(rustc);
-    if path
-        .components()
-        .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
-    {
-        return false;
-    }
-
-    let is_simple = !rustc.contains('/') && !rustc.contains('\\');
-    let bytes = rustc.as_bytes();
-    let is_absolute_unix = rustc.starts_with('/');
-    let is_absolute_windows = bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && matches!(bytes[2], b'/' | b'\\');
-    let is_unc = if bytes.len() >= 5 && bytes[0] == b'\\' && bytes[1] == b'\\' {
-        let third = bytes[2];
-        third != b'\\' && third != b'/' && bytes[2..].contains(&b'\\')
-    } else {
         false
-    };
-
-    if !(is_simple || is_absolute_unix || is_absolute_windows || is_unc) {
-        return false;
     }
 
-    if is_simple && rustc.contains(':') {
-        return false;
+    fn is_allowed_compiler_name(value: &str) -> bool {
+        let lower = value.to_ascii_lowercase();
+
+        matches!(
+            lower.as_str(),
+            "rustc"
+                | "rustc.exe"
+                | "rustc.bat"
+                | "rustc.cmd"
+                | "rustc_driver"
+                | "rustc_driver.exe"
+                | "rustc-wrapper"
+                | "rustc-wrapper.exe"
+                | "sccache"
+                | "sccache.exe"
+                | "ccache"
+                | "ccache.exe"
+        ) || lower.starts_with("rustc-")
+            || lower.starts_with("rustc_")
     }
 
-    if is_simple {
-        return is_allowed_compiler_name(rustc);
-    }
-
-    let inspected_path = match fs::canonicalize(path) {
-        Ok(path) => path,
-        Err(_) if is_absolute_windows || is_unc => PathBuf::from(rustc),
-        Err(_) => return false,
-    };
-
-    if let Some(parent) = inspected_path.parent() {
-        let parent_lower = parent.to_string_lossy().to_ascii_lowercase();
-        const ALLOWED_PREFIXES: &[&str] = &[
-            "/usr/bin",
-            "/usr/local/bin",
-            "/opt/",
-            "c:/rust",
-            "c:/program files",
-            "c:/users",
-            "c:\\rust",
-            "c:\\program files",
-            "c:\\users",
-        ];
-
-        let allowed = parent_lower.starts_with("\\\\")
-            || ALLOWED_PREFIXES
-                .iter()
-                .any(|prefix| parent_lower.starts_with(prefix))
-            || parent_lower.contains("/.cargo/bin")
-            || parent_lower.contains("\\.cargo\\bin")
-            || parent_lower.contains("/.rustup/toolchains")
-            || parent_lower.contains("\\.rustup\\toolchains")
-            || parent_lower.contains("program files");
-
-        if !allowed {
+    /// Evaluate whether a provided `rustc` executable path is considered safe
+    /// to execute.
+    ///
+    /// The validator aggressively rejects obvious command-injection vectors,
+    /// percent-encoded traversal attempts, and canonicalised paths that escape
+    /// a curated allowlist of toolchain directories. Canonicalisation is
+    /// only used to reduce symlink and traversal risks; the build
+    /// immediately hands off to Cargo after validation to avoid extending
+    /// the TOCTOU window.
+    pub(crate) fn rustc_path_is_safe(rustc: &str) -> bool {
+        if rustc.is_empty() || rustc.len() >= RUSTC_PATH_LENGTH_LIMIT {
             return false;
         }
+
+        if rustc.chars().any(|ch| {
+            matches!(
+                ch,
+                ';' | '&'
+                    | '|'
+                    | '`'
+                    | '$'
+                    | '>'
+                    | '<'
+                    | '\n'
+                    | '\r'
+                    | '\0'
+                    | '\t'
+                    | '"'
+                    | '\''
+                    | '*'
+                    | '?'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '('
+                    | ')'
+                    | '~'
+                    | '#'
+                    | '!'
+                    | '^'
+                    | ' '
+            )
+        }) {
+            return false;
+        }
+
+        if rustc.contains("..") || contains_forbidden_percent_encoding(rustc) {
+            return false;
+        }
+
+        if rustc.starts_with('-') {
+            return false;
+        }
+
+        let path = Path::new(rustc);
+        if path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+        {
+            return false;
+        }
+
+        let is_simple = !rustc.contains('/') && !rustc.contains('\\');
+        let bytes = rustc.as_bytes();
+        let is_absolute_unix = rustc.starts_with('/');
+        let is_absolute_windows = bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\');
+        let is_unc = if bytes.len() >= 5 && bytes[0] == b'\\' && bytes[1] == b'\\' {
+            let third = bytes[2];
+            third != b'\\' && third != b'/' && bytes[2..].contains(&b'\\')
+        } else {
+            false
+        };
+
+        if !(is_simple || is_absolute_unix || is_absolute_windows || is_unc) {
+            return false;
+        }
+
+        if is_simple && rustc.contains(':') {
+            return false;
+        }
+
+        if is_simple {
+            return is_allowed_compiler_name(rustc);
+        }
+
+        let inspected_path = match fs::canonicalize(path) {
+            Ok(path) => path,
+            Err(_) if is_absolute_windows || is_unc => PathBuf::from(rustc),
+            Err(_) => return false,
+        };
+
+        if let Some(parent) = inspected_path.parent() {
+            let parent_lower = parent.to_string_lossy().to_ascii_lowercase();
+            const ALLOWED_PREFIXES: &[&str] = &[
+                "/usr/bin",
+                "/usr/local/bin",
+                "/opt/",
+                "c:/rust",
+                "c:/program files",
+                "c:/users",
+                "c\\rust",
+                "c\\program files",
+                "c\\users",
+            ];
+
+            let allowed = parent_lower.starts_with("\\\\")
+                || ALLOWED_PREFIXES
+                    .iter()
+                    .any(|prefix| parent_lower.starts_with(prefix))
+                || parent_lower.contains("/.cargo/bin")
+                || parent_lower.contains("\\.cargo\\bin")
+                || parent_lower.contains("/.rustup/toolchains")
+                || parent_lower.contains("\\.rustup\\toolchains")
+                || parent_lower.contains("program files");
+
+            if !allowed {
+                return false;
+            }
+        }
+
+        let file_name = inspected_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.to_ascii_lowercase());
+
+        match file_name.as_deref() {
+            Some(name) if is_allowed_compiler_name(name) => {},
+            _ => return false,
+        }
+
+        true
     }
 
-    let file_name = inspected_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name.to_ascii_lowercase());
-
-    match file_name.as_deref() {
-        Some(name) if is_allowed_compiler_name(name) => {},
-        _ => return false,
+    #[cfg(test)]
+    pub(super) fn contains_forbidden_percent_encoding_public(value: &str) -> bool {
+        contains_forbidden_percent_encoding(value)
     }
-
-    true
 }
+
+pub(crate) use security::rustc_path_is_safe;
 
 fn main() {
     let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
@@ -530,7 +556,7 @@ fn try_write_repository_header(
 mod tests {
     use super::{
         HEADER_FILENAME, RUSTC_PATH_LENGTH_LIMIT, build_config, get_header_filename,
-        rustc_path_is_safe, write_if_changed,
+        rustc_path_is_safe, security, write_if_changed,
     };
     use std::{
         env, fs,
@@ -538,6 +564,22 @@ mod tests {
         path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    use proptest::prelude::*;
+
+    const FORBIDDEN_SHELL_CHARS: &[char] = &[
+        ';', '&', '|', '`', '$', '>', '<', '\n', '\r', '\0', '\t', '"', '\'', '*', '?', '[', ']',
+        '{', '}', '(', ')', '~', '#', '!', '^', ' ',
+    ];
+
+    const ALLOWED_WRAPPER_NAMES: &[&str] =
+        &["rustc", "rustc.exe", "rustc-wrapper", "sccache", "ccache"];
+
+    const NON_HEX_CHARS: &[char] = &['g', 'G', 'z', 'Z', '/', ':', '-', '_'];
+    const SAFE_HEX_DIGITS: &[char] = &[
+        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'A', 'B',
+        'C', 'D', 'E', 'F',
+    ];
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         let timestamp = SystemTime::now()
@@ -567,11 +609,26 @@ mod tests {
             assert!(!rustc_path_is_safe("rustc|malicious"));
         }
 
+        proptest! {
+            #[test]
+            fn rejects_forbidden_shell_chars(ch in prop::sample::select(FORBIDDEN_SHELL_CHARS.to_vec())) {
+                let candidate = format!("rustc{ch}payload");
+                prop_assert!(!rustc_path_is_safe(&candidate));
+            }
+        }
+
         #[test]
         fn allows_common_wrappers() {
             assert!(rustc_path_is_safe("/usr/bin/sccache"));
             assert!(rustc_path_is_safe("/usr/local/bin/rustc-wrapper"));
             assert!(rustc_path_is_safe("ccache"));
+        }
+
+        proptest! {
+            #[test]
+            fn allows_known_wrapper_names(wrapper in prop::sample::select(ALLOWED_WRAPPER_NAMES.to_vec())) {
+                prop_assert!(rustc_path_is_safe(wrapper));
+            }
         }
 
         #[test]
@@ -617,6 +674,25 @@ mod tests {
         }
 
         #[test]
+        fn rejects_incomplete_percent_at_end() {
+            assert!(security::contains_forbidden_percent_encoding_public("%"));
+            assert!(security::contains_forbidden_percent_encoding_public(
+                "rustc%"
+            ));
+            assert!(security::contains_forbidden_percent_encoding_public(
+                "rustc%2"
+            ));
+        }
+
+        proptest! {
+            #[test]
+            fn rejects_non_hex_percent_sequences(high in prop::sample::select(NON_HEX_CHARS.to_vec()), low in prop::sample::select(NON_HEX_CHARS.to_vec())) {
+                let candidate = format!("%{high}{low}");
+                prop_assert!(security::contains_forbidden_percent_encoding_public(&candidate));
+            }
+        }
+
+        #[test]
         fn allows_harmless_percent_sequences() {
             let base = unique_temp_dir("mw_percent_test");
             let cargo_bin = base.join(".cargo/bin");
@@ -631,6 +707,22 @@ mod tests {
                 .expect("path not valid UTF-8")
                 .to_string();
             assert!(rustc_path_is_safe(&tool_str));
+        }
+
+        proptest! {
+            #[test]
+            fn allows_safe_percent_sequences(
+                high in prop::sample::select(SAFE_HEX_DIGITS.to_vec()),
+                low in prop::sample::select(SAFE_HEX_DIGITS.to_vec()),
+            ) {
+                let pair = format!("{high}{low}");
+                if let Ok(decoded) = u8::from_str_radix(&pair, 16) {
+                    prop_assume!(!matches!(decoded, b'.' | b'/' | b'\\' | b' ' | b'\t' | b'\n' | b'\r'));
+
+                    let candidate = format!("/usr/local/bin/rustc%{pair}");
+                    prop_assert!(rustc_path_is_safe(&candidate));
+                }
+            }
         }
 
         #[cfg(unix)]

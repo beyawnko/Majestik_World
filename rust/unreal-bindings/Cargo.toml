@@ -19,3 +19,4 @@ majestic-world-core = { path = "../core", features = ["test-only-unsafe-hooks"] 
 
 [build-dependencies]
 cbindgen = "^0.27.0"
+proptest = { version = "1.4", default-features = false, features = ["std"] }
