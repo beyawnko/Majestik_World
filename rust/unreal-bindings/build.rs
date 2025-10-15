@@ -123,16 +123,22 @@ mod security {
                 continue;
             }
 
-            let remaining = bytes.len() - index;
-            if remaining <= 2 {
+            let Some(high_index) = index.checked_add(1) else {
+                return true;
+            };
+            let Some(low_index) = index.checked_add(2) else {
+                return true;
+            };
+
+            if high_index >= bytes.len() || low_index >= bytes.len() {
                 return true;
             }
 
-            let high = match bytes.get(index + 1).copied().and_then(decode_hex_digit) {
+            let high = match bytes.get(high_index).copied().and_then(decode_hex_digit) {
                 Some(value) => value,
                 None => return true,
             };
-            let low = match bytes.get(index + 2).copied().and_then(decode_hex_digit) {
+            let low = match bytes.get(low_index).copied().and_then(decode_hex_digit) {
                 Some(value) => value,
                 None => return true,
             };
@@ -259,11 +265,18 @@ mod security {
             return is_allowed_compiler_name(rustc);
         }
 
-        let inspected_path = match fs::canonicalize(path) {
-            Ok(path) => path,
-            Err(_) if is_absolute_windows || is_unc => PathBuf::from(rustc),
+        let (inspected_path, canonicalized) = match fs::canonicalize(path) {
+            Ok(path) => (path, true),
+            Err(_) if is_absolute_windows || is_unc => (PathBuf::from(rustc), false),
             Err(_) => return false,
         };
+
+        if canonicalized {
+            match fs::metadata(&inspected_path) {
+                Ok(metadata) if metadata.is_file() => {},
+                _ => return false,
+            }
+        }
 
         if let Some(parent) = inspected_path.parent() {
             let parent_lower = parent.to_string_lossy().to_ascii_lowercase();
@@ -567,26 +580,32 @@ mod tests {
 
     use proptest::prelude::*;
 
-    const FORBIDDEN_SHELL_CHARS: &[char] = &[
-        ';', '&', '|', '`', '$', '>', '<', '\n', '\r', '\0', '\t', '"', '\'', '*', '?', '[', ']',
-        '{', '}', '(', ')', '~', '#', '!', '^', ' ',
-    ];
+    mod test_constants {
+        pub(super) const FORBIDDEN_SHELL_CHARS: &[char] = &[
+            ';', '&', '|', '`', '$', '>', '<', '\n', '\r', '\0', '\t', '"', '\'', '*', '?', '[',
+            ']', '{', '}', '(', ')', '~', '#', '!', '^', ' ',
+        ];
 
-    const ALLOWED_WRAPPER_NAMES: &[&str] =
-        &["rustc", "rustc.exe", "rustc-wrapper", "sccache", "ccache"];
+        pub(super) const ALLOWED_WRAPPER_NAMES: &[&str] =
+            &["rustc", "rustc.exe", "rustc-wrapper", "sccache", "ccache"];
 
-    const NON_HEX_CHARS: &[char] = &['g', 'G', 'z', 'Z', '/', ':', '-', '_'];
-    const SAFE_HEX_DIGITS: &[char] = &[
-        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'A', 'B',
-        'C', 'D', 'E', 'F',
-    ];
+        pub(super) const NON_HEX_CHARS: &[char] = &['g', 'G', 'z', 'Z', '/', ':', '-', '_'];
+        pub(super) const SAFE_HEX_DIGITS: &[char] = &[
+            '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'A',
+            'B', 'C', 'D', 'E', 'F',
+        ];
+    }
 
-    fn unique_temp_dir(prefix: &str) -> PathBuf {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        env::temp_dir().join(format!("{prefix}_{:x}_{:x}", std::process::id(), timestamp))
+    mod test_helpers {
+        use super::*;
+
+        pub(super) fn unique_temp_dir(prefix: &str) -> PathBuf {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            env::temp_dir().join(format!("{prefix}_{:x}_{:x}", std::process::id(), timestamp))
+        }
     }
 
     mod rustc_path_validation {
@@ -611,7 +630,9 @@ mod tests {
 
         proptest! {
             #[test]
-            fn rejects_forbidden_shell_chars(ch in prop::sample::select(FORBIDDEN_SHELL_CHARS.to_vec())) {
+            fn rejects_forbidden_shell_chars(
+                ch in prop::sample::select(test_constants::FORBIDDEN_SHELL_CHARS.to_vec())
+            ) {
                 let candidate = format!("rustc{ch}payload");
                 prop_assert!(!rustc_path_is_safe(&candidate));
             }
@@ -626,7 +647,9 @@ mod tests {
 
         proptest! {
             #[test]
-            fn allows_known_wrapper_names(wrapper in prop::sample::select(ALLOWED_WRAPPER_NAMES.to_vec())) {
+            fn allows_known_wrapper_names(
+                wrapper in prop::sample::select(test_constants::ALLOWED_WRAPPER_NAMES.to_vec())
+            ) {
                 prop_assert!(rustc_path_is_safe(wrapper));
             }
         }
@@ -686,7 +709,10 @@ mod tests {
 
         proptest! {
             #[test]
-            fn rejects_non_hex_percent_sequences(high in prop::sample::select(NON_HEX_CHARS.to_vec()), low in prop::sample::select(NON_HEX_CHARS.to_vec())) {
+            fn rejects_non_hex_percent_sequences(
+                high in prop::sample::select(test_constants::NON_HEX_CHARS.to_vec()),
+                low in prop::sample::select(test_constants::NON_HEX_CHARS.to_vec())
+            ) {
                 let candidate = format!("%{high}{low}");
                 prop_assert!(security::contains_forbidden_percent_encoding_public(&candidate));
             }
@@ -694,7 +720,7 @@ mod tests {
 
         #[test]
         fn allows_harmless_percent_sequences() {
-            let base = unique_temp_dir("mw_percent_test");
+            let base = test_helpers::unique_temp_dir("mw_percent_test");
             let cargo_bin = base.join(".cargo/bin");
             fs::create_dir_all(&cargo_bin).expect("failed to create cargo bin directory");
             let _guard = super::file_operations::TempDirGuard(base.clone());
@@ -712,8 +738,8 @@ mod tests {
         proptest! {
             #[test]
             fn allows_safe_percent_sequences(
-                high in prop::sample::select(SAFE_HEX_DIGITS.to_vec()),
-                low in prop::sample::select(SAFE_HEX_DIGITS.to_vec()),
+                high in prop::sample::select(test_constants::SAFE_HEX_DIGITS.to_vec()),
+                low in prop::sample::select(test_constants::SAFE_HEX_DIGITS.to_vec()),
             ) {
                 let pair = format!("{high}{low}");
                 if let Ok(decoded) = u8::from_str_radix(&pair, 16) {
@@ -730,7 +756,7 @@ mod tests {
         fn rejects_symlink_pointing_to_unexpected_binary() {
             use std::os::unix::fs::symlink;
 
-            let temp_dir = unique_temp_dir("mw_build_symlink_test");
+            let temp_dir = test_helpers::unique_temp_dir("mw_build_symlink_test");
             let _ = fs::remove_dir_all(&temp_dir);
             fs::create_dir_all(&temp_dir).expect("failed to create symlink test dir");
             let _guard = super::file_operations::TempDirGuard(temp_dir.clone());
@@ -795,7 +821,7 @@ mod tests {
 
         #[test]
         fn enforces_directory_allowlist() {
-            let allowed_root = unique_temp_dir("mw_allowlist_ok");
+            let allowed_root = test_helpers::unique_temp_dir("mw_allowlist_ok");
             let allowed_bin = allowed_root.join(".cargo/bin");
             fs::create_dir_all(&allowed_bin).expect("failed to create allowed bin directory");
             let allowed_guard = super::file_operations::TempDirGuard(allowed_root.clone());
@@ -808,7 +834,7 @@ mod tests {
             assert!(rustc_path_is_safe(&allowed_str));
             drop(allowed_guard);
 
-            let disallowed_root = unique_temp_dir("mw_allowlist_blocked");
+            let disallowed_root = test_helpers::unique_temp_dir("mw_allowlist_blocked");
             fs::create_dir_all(&disallowed_root).expect("failed to create disallowed dir");
             let _disallowed_guard = super::file_operations::TempDirGuard(disallowed_root.clone());
             let disallowed_path = disallowed_root.join("rustc");
