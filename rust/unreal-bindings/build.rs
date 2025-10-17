@@ -63,7 +63,26 @@ const HEADER_PREAMBLE_TEMPLATE: &str = r#"/*
  *         }
  *         return exit_code;
  *     }
- */"#;
+*/"#;
+
+/// Represents a `rustc` path that has passed the hardened security validation.
+#[derive(Clone, Debug)]
+pub struct SafeRustcPath(PathBuf);
+
+impl SafeRustcPath {
+    /// Validate a `rustc` path and wrap it in [`SafeRustcPath`] when the input
+    /// satisfies all security checks.
+    pub fn validate(candidate: &str) -> Option<Self> {
+        if security::rustc_path_is_safe(candidate) {
+            Some(Self(PathBuf::from(candidate)))
+        } else {
+            None
+        }
+    }
+
+    /// Borrow the underlying path as a [`Path`].
+    pub fn as_path(&self) -> &Path { &self.0 }
+}
 
 fn get_header_filename() -> String {
     const ENV_KEY: &str = "MW_FFI_HEADER_NAME";
@@ -94,261 +113,13 @@ fn get_header_filename() -> String {
     }
 }
 
-/// Security-oriented helpers that validate toolchain execution paths before
-/// invoking `rustc`.
-mod security {
-    use std::{
-        fs,
-        path::{Component, Path, PathBuf},
-    };
-
-    use super::RUSTC_PATH_LENGTH_LIMIT;
-
-    fn decode_hex_digit(byte: u8) -> Option<u8> {
-        match byte {
-            b'0'..=b'9' => Some(byte - b'0'),
-            b'a'..=b'f' => Some(byte - b'a' + 10),
-            b'A'..=b'F' => Some(byte - b'A' + 10),
-            _ => None,
-        }
-    }
-
-    fn contains_forbidden_percent_encoding(value: &str) -> bool {
-        let bytes = value.as_bytes();
-        let mut index = 0;
-
-        while index < bytes.len() {
-            if bytes[index] != b'%' {
-                index += 1;
-                continue;
-            }
-
-            let Some(high_index) = index.checked_add(1) else {
-                return true;
-            };
-            let Some(low_index) = index.checked_add(2) else {
-                return true;
-            };
-
-            if high_index >= bytes.len() || low_index >= bytes.len() {
-                return true;
-            }
-
-            let high = match bytes.get(high_index).copied().and_then(decode_hex_digit) {
-                Some(value) => value,
-                None => return true,
-            };
-            let low = match bytes.get(low_index).copied().and_then(decode_hex_digit) {
-                Some(value) => value,
-                None => return true,
-            };
-            let decoded = (high << 4) | low;
-
-            match decoded {
-                b'.' | b'/' | b'\\' | b' ' | b'\t' | b'\n' | b'\r' => return true,
-                _ => {},
-            }
-
-            index += 3;
-        }
-
-        false
-    }
-
-    fn is_allowed_compiler_name(value: &str) -> bool {
-        let lower = value.to_ascii_lowercase();
-
-        matches!(
-            lower.as_str(),
-            "rustc"
-                | "rustc.exe"
-                | "rustc.bat"
-                | "rustc.cmd"
-                | "rustc_driver"
-                | "rustc_driver.exe"
-                | "rustc-wrapper"
-                | "rustc-wrapper.exe"
-                | "sccache"
-                | "sccache.exe"
-                | "ccache"
-                | "ccache.exe"
-        ) || lower.starts_with("rustc-")
-            || lower.starts_with("rustc_")
-    }
-
-    /// Evaluate whether a provided `rustc` executable path is considered safe
-    /// to execute.
-    ///
-    /// The validator aggressively rejects obvious command-injection vectors,
-    /// percent-encoded traversal attempts, and canonicalised paths that escape
-    /// a curated allowlist of toolchain directories. Canonicalisation is
-    /// only used to reduce symlink and traversal risks; the build
-    /// immediately hands off to Cargo after validation to avoid extending
-    /// the TOCTOU window.
-    pub(crate) fn rustc_path_is_safe(rustc: &str) -> bool {
-        if rustc.is_empty() || rustc.len() >= RUSTC_PATH_LENGTH_LIMIT {
-            return false;
-        }
-
-        if rustc.chars().any(|ch| {
-            matches!(
-                ch,
-                ';' | '&'
-                    | '|'
-                    | '`'
-                    | '$'
-                    | '>'
-                    | '<'
-                    | '\n'
-                    | '\r'
-                    | '\0'
-                    | '\t'
-                    | '"'
-                    | '\''
-                    | '*'
-                    | '?'
-                    | '['
-                    | ']'
-                    | '{'
-                    | '}'
-                    | '('
-                    | ')'
-                    | '~'
-                    | '#'
-                    | '!'
-                    | '^'
-                    | ' '
-            )
-        }) {
-            return false;
-        }
-
-        if rustc.contains("..") || contains_forbidden_percent_encoding(rustc) {
-            return false;
-        }
-
-        if rustc.starts_with('-') {
-            return false;
-        }
-
-        let path = Path::new(rustc);
-        if path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
-        {
-            return false;
-        }
-
-        let is_simple = !rustc.contains('/') && !rustc.contains('\\');
-        let bytes = rustc.as_bytes();
-        let is_absolute_unix = rustc.starts_with('/');
-        let is_absolute_windows = bytes.len() >= 3
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && matches!(bytes[2], b'/' | b'\\');
-        let is_unc = if bytes.len() >= 5 && bytes[0] == b'\\' && bytes[1] == b'\\' {
-            let third = bytes[2];
-            third != b'\\' && third != b'/' && bytes[2..].contains(&b'\\')
-        } else {
-            false
-        };
-
-        if !(is_simple || is_absolute_unix || is_absolute_windows || is_unc) {
-            return false;
-        }
-
-        if is_simple && rustc.contains(':') {
-            return false;
-        }
-
-        if is_simple {
-            return is_allowed_compiler_name(rustc);
-        }
-
-        let (inspected_path, canonicalized) = match fs::canonicalize(path) {
-            Ok(path) => (path, true),
-            Err(_) if is_absolute_windows || is_unc => (PathBuf::from(rustc), false),
-            Err(_) => return false,
-        };
-
-        if canonicalized {
-            match fs::metadata(&inspected_path) {
-                Ok(metadata) => {
-                    if !metadata.is_file() {
-                        return false;
-                    }
-
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-
-                        // Reject toolchains that are world-writable to avoid executing binaries
-                        // attackers could swap between validation and use.
-                        const WORLD_WRITABLE: u32 = 0o002;
-                        if metadata.permissions().mode() & WORLD_WRITABLE != 0 {
-                            return false;
-                        }
-                    }
-                },
-                Err(_) => return false,
-            }
-        }
-
-        if let Some(parent) = inspected_path.parent() {
-            let parent_lower = parent.to_string_lossy().to_ascii_lowercase();
-            const ALLOWED_PREFIXES: &[&str] = &[
-                "/usr/bin",
-                "/usr/local/bin",
-                "/opt/",
-                "c:/rust",
-                "c:/program files",
-                "c:/users",
-                "c\\rust",
-                "c\\program files",
-                "c\\users",
-            ];
-
-            let allowed = parent_lower.starts_with("\\\\")
-                || ALLOWED_PREFIXES
-                    .iter()
-                    .any(|prefix| parent_lower.starts_with(prefix))
-                || parent_lower.contains("/.cargo/bin")
-                || parent_lower.contains("\\.cargo\\bin")
-                || parent_lower.contains("/.rustup/toolchains")
-                || parent_lower.contains("\\.rustup\\toolchains")
-                || parent_lower.contains("program files");
-
-            if !allowed {
-                return false;
-            }
-        }
-
-        let file_name = inspected_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(|name| name.to_ascii_lowercase());
-
-        match file_name.as_deref() {
-            Some(name) if is_allowed_compiler_name(name) => {},
-            _ => return false,
-        }
-
-        true
-    }
-
-    #[cfg(test)]
-    pub(super) fn contains_forbidden_percent_encoding_public(value: &str) -> bool {
-        contains_forbidden_percent_encoding(value)
-    }
-}
-
-pub(crate) use security::rustc_path_is_safe;
+#[path = "src/security.rs"] mod security;
 
 fn main() {
     let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
-    if !rustc_path_is_safe(&rustc) {
+    let _validated_rustc = SafeRustcPath::validate(&rustc).unwrap_or_else(|| {
         panic!("refusing to execute rustc with potentially malicious path: {rustc}");
-    }
+    });
 
     if let Err(err) = generate_header() {
         panic!("failed to generate C header: {err}");
@@ -583,37 +354,18 @@ fn try_write_repository_header(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        HEADER_FILENAME, RUSTC_PATH_LENGTH_LIMIT, build_config, get_header_filename,
-        rustc_path_is_safe, security, write_if_changed,
-    };
-    use std::{
-        env, fs,
-        io::{Error as IoError, ErrorKind},
-        path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use super::*;
+    use std::path::{Path, PathBuf};
 
-    use proptest::prelude::*;
-
-    mod test_constants {
-        pub(super) const FORBIDDEN_SHELL_CHARS: &[char] = &[
-            ';', '&', '|', '`', '$', '>', '<', '\n', '\r', '\0', '\t', '"', '\'', '*', '?', '[',
-            ']', '{', '}', '(', ')', '~', '#', '!', '^', ' ',
-        ];
-
-        pub(super) const ALLOWED_WRAPPER_NAMES: &[&str] =
-            &["rustc", "rustc.exe", "rustc-wrapper", "sccache", "ccache"];
-
-        pub(super) const NON_HEX_CHARS: &[char] = &['g', 'G', 'z', 'Z', '/', ':', '-', '_'];
-        pub(super) const SAFE_HEX_DIGITS: &[char] = &[
-            '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'A',
-            'B', 'C', 'D', 'E', 'F',
-        ];
-    }
-
-    mod test_helpers {
+    mod fixtures {
         use super::*;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        pub(super) struct TempDirGuard(pub(super) PathBuf);
+
+        impl Drop for TempDirGuard {
+            fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+        }
 
         pub(super) fn unique_temp_dir(prefix: &str) -> PathBuf {
             let timestamp = SystemTime::now()
@@ -622,271 +374,36 @@ mod tests {
                 .as_nanos();
             env::temp_dir().join(format!("{prefix}_{:x}_{:x}", std::process::id(), timestamp))
         }
+
+        pub(super) fn create_tool(path: &Path, contents: &[u8]) {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("failed to create parent directory");
+            }
+            fs::write(path, contents).expect("failed to create tool contents");
+        }
     }
 
-    mod rustc_path_validation {
+    mod safe_rustc_path {
         use super::*;
+        use fixtures::{TempDirGuard, create_tool, unique_temp_dir};
 
         #[test]
-        fn accepts_normal_rustc_paths() {
-            assert!(rustc_path_is_safe("/usr/bin/rustc"));
-
-            #[cfg(windows)]
-            {
-                assert!(rustc_path_is_safe(r"C:/Rust/bin/rustc.exe"));
-                assert!(rustc_path_is_safe(r"C:\Rust\bin\rustc.exe"));
-            }
+        fn validate_rejects_untrusted_paths() {
+            assert!(SafeRustcPath::validate("../rustc").is_none());
+            assert!(SafeRustcPath::validate("rustc malicious").is_none());
         }
 
         #[test]
-        fn rejects_paths_with_shell_metacharacters() {
-            assert!(!rustc_path_is_safe("/usr/bin/rustc;rm -rf /"));
-            assert!(!rustc_path_is_safe("rustc|malicious"));
-        }
+        fn validate_wraps_safe_paths() {
+            let root = unique_temp_dir("mw_safe_rustc");
+            let guard = TempDirGuard(root.clone());
+            let tool = root.join(".cargo/bin/rustc");
+            create_tool(&tool, b"#!/bin/true\n");
 
-        proptest! {
-            #[test]
-            fn rejects_forbidden_shell_chars(
-                ch in prop::sample::select(test_constants::FORBIDDEN_SHELL_CHARS.to_vec())
-            ) {
-                let candidate = format!("rustc{ch}payload");
-                prop_assert!(!rustc_path_is_safe(&candidate));
-            }
-        }
-
-        #[test]
-        fn allows_common_wrappers() {
-            assert!(rustc_path_is_safe("/usr/bin/sccache"));
-            assert!(rustc_path_is_safe("/usr/local/bin/rustc-wrapper"));
-            assert!(rustc_path_is_safe("ccache"));
-        }
-
-        proptest! {
-            #[test]
-            fn allows_known_wrapper_names(
-                wrapper in prop::sample::select(test_constants::ALLOWED_WRAPPER_NAMES.to_vec())
-            ) {
-                prop_assert!(rustc_path_is_safe(wrapper));
-            }
-        }
-
-        #[test]
-        fn rejects_additional_dangerous_characters() {
-            assert!(!rustc_path_is_safe("rustc\0malicious"));
-            assert!(!rustc_path_is_safe(r#"rustc"evil"#));
-            assert!(!rustc_path_is_safe("rustc'bad'"));
-            assert!(!rustc_path_is_safe("rustc\\inject"));
-            assert!(!rustc_path_is_safe("rustc*glob"));
-            assert!(!rustc_path_is_safe("rustc?wildcard"));
-            assert!(!rustc_path_is_safe("rustc[range]"));
-            assert!(!rustc_path_is_safe("rustc{expansion}"));
-            assert!(!rustc_path_is_safe("rustc(subshell)"));
-            assert!(!rustc_path_is_safe("rustc~home"));
-            assert!(!rustc_path_is_safe("rustc#fragment"));
-            assert!(!rustc_path_is_safe("rustc!history"));
-            assert!(!rustc_path_is_safe("rustc%env"));
-            assert!(!rustc_path_is_safe("rustc^caret"));
-        }
-
-        #[test]
-        fn rejects_path_traversal_attempts() {
-            assert!(!rustc_path_is_safe("/usr/bin/../../../bin/sh"));
-            assert!(!rustc_path_is_safe("../rustc"));
-            assert!(!rustc_path_is_safe("rustc/../evil"));
-        }
-
-        #[test]
-        fn rejects_url_encoded_path_traversal() {
-            assert!(!rustc_path_is_safe("/usr/bin/%2e%2e/sh"));
-            assert!(!rustc_path_is_safe("%2E%2E/rustc"));
-            assert!(!rustc_path_is_safe("rustc/%2e%2E/evil"));
-            assert!(!rustc_path_is_safe("/usr%2e%2e/bin/sh"));
-            assert!(!rustc_path_is_safe("path/to/..%2f../evil"));
-        }
-
-        #[test]
-        fn rejects_malformed_percent_sequences() {
-            assert!(!rustc_path_is_safe("rustc%"));
-            assert!(!rustc_path_is_safe("rustc%2"));
-            assert!(!rustc_path_is_safe("rustc%2G"));
-            assert!(!rustc_path_is_safe("%"));
-        }
-
-        #[test]
-        fn rejects_incomplete_percent_at_end() {
-            assert!(security::contains_forbidden_percent_encoding_public("%"));
-            assert!(security::contains_forbidden_percent_encoding_public(
-                "rustc%"
-            ));
-            assert!(security::contains_forbidden_percent_encoding_public(
-                "rustc%2"
-            ));
-        }
-
-        proptest! {
-            #[test]
-            fn rejects_non_hex_percent_sequences(
-                high in prop::sample::select(test_constants::NON_HEX_CHARS.to_vec()),
-                low in prop::sample::select(test_constants::NON_HEX_CHARS.to_vec())
-            ) {
-                let candidate = format!("%{high}{low}");
-                prop_assert!(security::contains_forbidden_percent_encoding_public(&candidate));
-            }
-        }
-
-        #[test]
-        fn allows_harmless_percent_sequences() {
-            let base = test_helpers::unique_temp_dir("mw_percent_test");
-            let cargo_bin = base.join(".cargo/bin");
-            fs::create_dir_all(&cargo_bin).expect("failed to create cargo bin directory");
-            let _guard = super::file_operations::TempDirGuard(base.clone());
-
-            let tool_path = cargo_bin.join("rustc%41");
-            fs::write(&tool_path, b"#!/bin/true\n").expect("failed to create dummy compiler");
-
-            let tool_str = tool_path
-                .to_str()
-                .expect("path not valid UTF-8")
-                .to_string();
-            assert!(rustc_path_is_safe(&tool_str));
-        }
-
-        proptest! {
-            #[test]
-            fn allows_safe_percent_sequences(
-                high in prop::sample::select(test_constants::SAFE_HEX_DIGITS.to_vec()),
-                low in prop::sample::select(test_constants::SAFE_HEX_DIGITS.to_vec()),
-            ) {
-                let pair = format!("{high}{low}");
-                if let Ok(decoded) = u8::from_str_radix(&pair, 16) {
-                    prop_assume!(!matches!(decoded, b'.' | b'/' | b'\\' | b' ' | b'\t' | b'\n' | b'\r'));
-
-                    let candidate = format!("/usr/local/bin/rustc%{pair}");
-                    prop_assert!(rustc_path_is_safe(&candidate));
-                }
-            }
-        }
-
-        #[cfg(unix)]
-        #[test]
-        fn rejects_symlink_pointing_to_unexpected_binary() {
-            use std::os::unix::fs::symlink;
-
-            let temp_dir = test_helpers::unique_temp_dir("mw_build_symlink_test");
-            let _ = fs::remove_dir_all(&temp_dir);
-            fs::create_dir_all(&temp_dir).expect("failed to create symlink test dir");
-            let _guard = super::file_operations::TempDirGuard(temp_dir.clone());
-
-            let target = temp_dir.join("not_rustc");
-            fs::write(&target, b"echo not rustc").expect("failed to create target file");
-            let link_path = temp_dir.join("rustc");
-            symlink(&target, &link_path).expect("failed to create symlink");
-
-            let link_str = link_path
-                .to_str()
-                .expect("symlink path not valid UTF-8")
-                .to_string();
-            assert!(!rustc_path_is_safe(&link_str));
-        }
-
-        #[cfg(unix)]
-        #[test]
-        fn rejects_world_writable_compiler() {
-            use std::os::unix::fs::PermissionsExt;
-
-            let temp_dir = test_helpers::unique_temp_dir("mw_world_writable");
-            let cargo_bin = temp_dir.join(".cargo/bin");
-            fs::create_dir_all(&cargo_bin).expect("failed to create cargo bin directory");
-            let _guard = super::file_operations::TempDirGuard(temp_dir.clone());
-
-            let compiler_path = cargo_bin.join("rustc");
-            fs::write(&compiler_path, b"#!/bin/true\n").expect("failed to create compiler stub");
-
-            let mut perms = fs::metadata(&compiler_path)
-                .expect("failed to fetch metadata")
-                .permissions();
-            perms.set_mode(0o777);
-            fs::set_permissions(&compiler_path, perms).expect("failed to update permissions");
-
-            let compiler_str = compiler_path
-                .to_str()
-                .expect("path not valid UTF-8")
-                .to_string();
-            assert!(!rustc_path_is_safe(&compiler_str));
-        }
-
-        #[test]
-        fn distinguishes_absolute_simple_and_relative_paths() {
-            assert!(rustc_path_is_safe("rustc"));
-            assert!(rustc_path_is_safe("/usr/bin/rustc"));
-            #[cfg(windows)]
-            {
-                assert!(rustc_path_is_safe(r"C:/Rust/bin/rustc.exe"));
-                assert!(rustc_path_is_safe(r"C:\Rust\bin\rustc.exe"));
-            }
-            assert!(!rustc_path_is_safe("bin/rustc"));
-            assert!(!rustc_path_is_safe(r".\rustc.exe"));
-        }
-
-        #[cfg(windows)]
-        #[test]
-        fn accepts_windows_backslash_paths() {
-            assert!(rustc_path_is_safe(r"C:\Rust\bin\rustc.exe"));
-            assert!(rustc_path_is_safe(r"\\\\server\\share\\rustc.exe"));
-        }
-
-        #[test]
-        fn rejects_space_characters_and_url_encoded_spaces() {
-            assert!(!rustc_path_is_safe("rustc malicious"));
-            assert!(!rustc_path_is_safe("/usr/bin/rustc evil"));
-            assert!(!rustc_path_is_safe("rustc%20inject"));
-            assert!(!rustc_path_is_safe("%20rustc"));
-            assert!(!rustc_path_is_safe("rustc%20%20evil"));
-        }
-
-        #[test]
-        fn rejects_flag_injection() {
-            assert!(!rustc_path_is_safe("-Zprint-link-args"));
-            assert!(!rustc_path_is_safe("--help"));
-        }
-
-        #[test]
-        fn rejects_oversized_paths() {
-            let oversized = "a".repeat(RUSTC_PATH_LENGTH_LIMIT + 1);
-            assert!(!rustc_path_is_safe(&oversized));
-        }
-
-        #[test]
-        fn rejects_suspicious_canonical_paths() {
-            assert!(!rustc_path_is_safe("/tmp/../../../bin/sh"));
-        }
-
-        #[test]
-        fn enforces_directory_allowlist() {
-            let allowed_root = test_helpers::unique_temp_dir("mw_allowlist_ok");
-            let allowed_bin = allowed_root.join(".cargo/bin");
-            fs::create_dir_all(&allowed_bin).expect("failed to create allowed bin directory");
-            let allowed_guard = super::file_operations::TempDirGuard(allowed_root.clone());
-            let allowed_path = allowed_bin.join("rustc");
-            fs::write(&allowed_path, b"#!/bin/true\n").expect("failed to create allowed tool");
-            let allowed_str = allowed_path
-                .to_str()
-                .expect("allowed path not UTF-8")
-                .to_string();
-            assert!(rustc_path_is_safe(&allowed_str));
-            drop(allowed_guard);
-
-            let disallowed_root = test_helpers::unique_temp_dir("mw_allowlist_blocked");
-            fs::create_dir_all(&disallowed_root).expect("failed to create disallowed dir");
-            let _disallowed_guard = super::file_operations::TempDirGuard(disallowed_root.clone());
-            let disallowed_path = disallowed_root.join("rustc");
-            fs::write(&disallowed_path, b"#!/bin/true\n")
-                .expect("failed to create disallowed tool");
-            let disallowed_str = disallowed_path
-                .to_str()
-                .expect("disallowed path not UTF-8")
-                .to_string();
-            assert!(!rustc_path_is_safe(&disallowed_str));
+            let tool_str = tool.to_str().expect("path not UTF-8");
+            let validated = SafeRustcPath::validate(tool_str).expect("expected validation success");
+            assert_eq!(validated.as_path(), Path::new(tool_str));
+            drop(guard);
         }
     }
 
@@ -949,26 +466,11 @@ mod tests {
 
     mod file_operations {
         use super::*;
-
-        pub(super) struct TempDirGuard(pub(super) PathBuf);
-
-        impl Drop for TempDirGuard {
-            fn drop(&mut self) {
-                if let Err(err) = fs::remove_dir_all(&self.0) {
-                    eprintln!(
-                        "warning: failed to clean temporary directory {}: {err}",
-                        self.0.display()
-                    );
-                }
-            }
-        }
+        use fixtures::{TempDirGuard, unique_temp_dir};
 
         #[test]
         fn write_if_changed_propagates_permission_errors() {
-            let temp_dir = std::env::temp_dir().join(format!(
-                "mw_build_write_permission_test_{}",
-                std::process::id()
-            ));
+            let temp_dir = unique_temp_dir("mw_build_write_permission_test");
             let _ = fs::remove_dir_all(&temp_dir);
             fs::create_dir_all(&temp_dir).expect("failed to create temp dir");
             let _guard = TempDirGuard(temp_dir.clone());
