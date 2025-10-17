@@ -1,3 +1,8 @@
+//! Hardened validation helpers that gate execution of external toolchain
+//! binaries from the build script. The routines deliberately fail closed when
+//! encountering ambiguous filesystem state to minimise the risk of command
+//! injection or traversal attacks.
+
 use std::{
     fs::{self, Metadata},
     path::{Component, Path, PathBuf},
@@ -6,6 +11,22 @@ use std::{
 use super::RUSTC_PATH_LENGTH_LIMIT;
 
 const ALLOWED_HIDDEN_COMPONENTS: &[&str] = &[".cargo", ".rustup"];
+const MIN_WINDOWS_ABSOLUTE_LENGTH: usize = 3;
+const MIN_UNC_PATH_LENGTH: usize = 5;
+const ALLOWED_PARENT_PREFIXES: &[&str] = &[
+    "/usr/bin",
+    "/usr/local/bin",
+    "/opt/",
+    "c:/rust",
+    "c:/program files",
+    "c:/users",
+    "c\\rust",
+    "c\\program files",
+    "c\\users",
+];
+
+#[cfg(unix)]
+const WORLD_WRITABLE_MASK: u32 = 0o002;
 
 fn decode_hex_digit(byte: u8) -> Option<u8> {
     match byte {
@@ -20,36 +41,22 @@ fn contains_forbidden_percent_encoding(value: &str) -> bool {
     let bytes = value.as_bytes();
     let mut index = 0;
 
-    while index < bytes.len() {
-        if bytes[index] != b'%' {
+    while let Some(&byte) = bytes.get(index) {
+        if byte != b'%' {
             index += 1;
             continue;
         }
 
-        let Some(high_index) = index.checked_add(1) else {
-            return true;
-        };
-        let Some(low_index) = index.checked_add(2) else {
-            return true;
+        let decoded = match (bytes.get(index + 1), bytes.get(index + 2)) {
+            (Some(&high), Some(&low)) => match (decode_hex_digit(high), decode_hex_digit(low)) {
+                (Some(high), Some(low)) => (high << 4) | low,
+                _ => return true,
+            },
+            _ => return true,
         };
 
-        if high_index >= bytes.len() || low_index >= bytes.len() {
+        if matches!(decoded, b'.' | b'/' | b'\\' | b' ' | b'\t' | b'\n' | b'\r') {
             return true;
-        }
-
-        let high = match bytes.get(high_index).copied().and_then(decode_hex_digit) {
-            Some(value) => value,
-            None => return true,
-        };
-        let low = match bytes.get(low_index).copied().and_then(decode_hex_digit) {
-            Some(value) => value,
-            None => return true,
-        };
-        let decoded = (high << 4) | low;
-
-        match decoded {
-            b'.' | b'/' | b'\\' | b' ' | b'\t' | b'\n' | b'\r' => return true,
-            _ => {},
         }
 
         index += 3;
@@ -179,11 +186,11 @@ pub(crate) fn rustc_path_is_safe(rustc: &str) -> bool {
     let is_simple = !rustc.contains('/') && !rustc.contains('\\');
     let bytes = rustc.as_bytes();
     let is_absolute_unix = rustc.starts_with('/');
-    let is_absolute_windows = bytes.len() >= 3
+    let is_absolute_windows = bytes.len() >= MIN_WINDOWS_ABSOLUTE_LENGTH
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
         && matches!(bytes[2], b'/' | b'\\');
-    let is_unc = if bytes.len() >= 5 && bytes[0] == b'\\' && bytes[1] == b'\\' {
+    let is_unc = if bytes.len() >= MIN_UNC_PATH_LENGTH && bytes[0] == b'\\' && bytes[1] == b'\\' {
         let third = bytes[2];
         third != b'\\' && third != b'/' && bytes[2..].contains(&b'\\')
     } else {
@@ -206,27 +213,24 @@ pub(crate) fn rustc_path_is_safe(rustc: &str) -> bool {
         return false;
     }
 
-    let (inspected_path, canonicalized) = match fs::canonicalize(path) {
-        Ok(path) => (path, true),
-        Err(_) if is_absolute_windows || is_unc => (PathBuf::from(rustc), false),
+    let (inspected_path, metadata) = match fs::canonicalize(path) {
+        Ok(canonical) => match metadata_for(&canonical) {
+            Some(meta) => (canonical, meta),
+            None => return false,
+        },
+        Err(_) if is_absolute_windows || is_unc => {
+            let fallback = PathBuf::from(rustc);
+            match metadata_for(&fallback).or_else(|| metadata_for(path)) {
+                Some(meta) => (fallback, meta),
+                None => return false,
+            }
+        },
         Err(_) => return false,
     };
 
     if has_suspicious_component(&inspected_path) {
         return false;
     }
-
-    let metadata = if canonicalized {
-        match metadata_for(&inspected_path) {
-            Some(meta) => meta,
-            None => return false,
-        }
-    } else {
-        match metadata_for(&inspected_path).or_else(|| metadata_for(path)) {
-            Some(meta) => meta,
-            None => return false,
-        }
-    };
 
     if !metadata.is_file() {
         return false;
@@ -236,28 +240,15 @@ pub(crate) fn rustc_path_is_safe(rustc: &str) -> bool {
     {
         use std::os::unix::fs::PermissionsExt;
 
-        const WORLD_WRITABLE: u32 = 0o002;
-        if metadata.permissions().mode() & WORLD_WRITABLE != 0 {
+        if metadata.permissions().mode() & WORLD_WRITABLE_MASK != 0 {
             return false;
         }
     }
 
     if let Some(parent) = inspected_path.parent() {
         let parent_lower = parent.to_string_lossy().to_ascii_lowercase();
-        const ALLOWED_PREFIXES: &[&str] = &[
-            "/usr/bin",
-            "/usr/local/bin",
-            "/opt/",
-            "c:/rust",
-            "c:/program files",
-            "c:/users",
-            "c\\rust",
-            "c\\program files",
-            "c\\users",
-        ];
-
         let allowed = parent_lower.starts_with("\\\\")
-            || ALLOWED_PREFIXES
+            || ALLOWED_PARENT_PREFIXES
                 .iter()
                 .any(|prefix| parent_lower.starts_with(prefix))
             || parent_lower.contains("/.cargo/bin")

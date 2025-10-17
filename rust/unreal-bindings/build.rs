@@ -84,6 +84,14 @@ impl SafeRustcPath {
     pub fn as_path(&self) -> &Path { &self.0 }
 }
 
+impl AsRef<Path> for SafeRustcPath {
+    fn as_ref(&self) -> &Path { self.as_path() }
+}
+
+impl From<SafeRustcPath> for PathBuf {
+    fn from(value: SafeRustcPath) -> Self { value.0 }
+}
+
 fn get_header_filename() -> String {
     const ENV_KEY: &str = "MW_FFI_HEADER_NAME";
     match env::var(ENV_KEY) {
