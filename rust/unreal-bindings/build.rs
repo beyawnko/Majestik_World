@@ -273,8 +273,24 @@ mod security {
 
         if canonicalized {
             match fs::metadata(&inspected_path) {
-                Ok(metadata) if metadata.is_file() => {},
-                _ => return false,
+                Ok(metadata) => {
+                    if !metadata.is_file() {
+                        return false;
+                    }
+
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+
+                        // Reject toolchains that are world-writable to avoid executing binaries
+                        // attackers could swap between validation and use.
+                        const WORLD_WRITABLE: u32 = 0o002;
+                        if metadata.permissions().mode() & WORLD_WRITABLE != 0 {
+                            return false;
+                        }
+                    }
+                },
+                Err(_) => return false,
             }
         }
 
@@ -771,6 +787,32 @@ mod tests {
                 .expect("symlink path not valid UTF-8")
                 .to_string();
             assert!(!rustc_path_is_safe(&link_str));
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn rejects_world_writable_compiler() {
+            use std::os::unix::fs::PermissionsExt;
+
+            let temp_dir = test_helpers::unique_temp_dir("mw_world_writable");
+            let cargo_bin = temp_dir.join(".cargo/bin");
+            fs::create_dir_all(&cargo_bin).expect("failed to create cargo bin directory");
+            let _guard = super::file_operations::TempDirGuard(temp_dir.clone());
+
+            let compiler_path = cargo_bin.join("rustc");
+            fs::write(&compiler_path, b"#!/bin/true\n").expect("failed to create compiler stub");
+
+            let mut perms = fs::metadata(&compiler_path)
+                .expect("failed to fetch metadata")
+                .permissions();
+            perms.set_mode(0o777);
+            fs::set_permissions(&compiler_path, perms).expect("failed to update permissions");
+
+            let compiler_str = compiler_path
+                .to_str()
+                .expect("path not valid UTF-8")
+                .to_string();
+            assert!(!rustc_path_is_safe(&compiler_str));
         }
 
         #[test]
