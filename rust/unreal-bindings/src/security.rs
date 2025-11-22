@@ -2,9 +2,28 @@
 //! binaries from the build script. The routines deliberately fail closed when
 //! encountering ambiguous filesystem state to minimise the risk of command
 //! injection or traversal attacks.
+//!
+//! # Security Model
+//!
+//! This module implements defence-in-depth validation for `rustc` executable
+//! paths to mitigate:
+//!
+//! - **Command injection:** shell metacharacters are rejected before spawning
+//!   the compiler.
+//! - **Path traversal:** plain and percent-encoded traversal attempts are
+//!   blocked prior to canonicalisation.
+//! - **Symlink manipulation:** canonicalisation combined with component checks
+//!   prevents chaining through hostile symlinks.
+//! - **Permission escalation:** world-writable executables are disallowed on
+//!   Unix hosts to prevent privilege downgrades.
+//! - **Directory escapes:** canonicalised paths must reside under an
+//!   allowlisted toolchain directory.
+//!
+//! Validation prioritises safety over convenience. Any ambiguous or malformed
+//! input causes the function to fail closed instead of emitting warnings.
 
 use std::{
-    fs::{self, Metadata},
+    fs,
     path::{Component, Path, PathBuf},
 };
 
@@ -116,24 +135,16 @@ fn is_allowed_compiler_name(value: &str) -> bool {
         || lower.starts_with("rustc_")
 }
 
-fn metadata_for(path: &Path) -> Option<Metadata> {
-    match fs::metadata(path) {
-        Ok(meta) => Some(meta),
-        Err(_) => None,
-    }
-}
-
-/// Evaluate whether a provided `rustc` executable path is considered safe to
-/// execute.
-///
-/// The validator aggressively rejects obvious command-injection vectors,
-/// percent-encoded traversal attempts, canonicalised paths that escape a
-/// curated allowlist of toolchain directories, and executables with unsafe
-/// permissions. Canonicalisation is only used to reduce symlink and traversal
-/// risks; the build immediately hands off to Cargo after validation to avoid
-/// extending the TOCTOU window.
-pub(crate) fn rustc_path_is_safe(rustc: &str) -> bool {
+fn validate_basic_path_constraints(rustc: &str) -> bool {
     if rustc.is_empty() || rustc.len() >= RUSTC_PATH_LENGTH_LIMIT {
+        return false;
+    }
+
+    if rustc.starts_with('-') {
+        return false;
+    }
+
+    if rustc.contains("..") || contains_forbidden_percent_encoding(rustc) {
         return false;
     }
 
@@ -170,11 +181,20 @@ pub(crate) fn rustc_path_is_safe(rustc: &str) -> bool {
         return false;
     }
 
-    if rustc.contains("..") || contains_forbidden_percent_encoding(rustc) {
-        return false;
-    }
+    true
+}
 
-    if rustc.starts_with('-') {
+/// Evaluate whether a provided `rustc` executable path is considered safe to
+/// execute.
+///
+/// The validator aggressively rejects obvious command-injection vectors,
+/// percent-encoded traversal attempts, canonicalised paths that escape a
+/// curated allowlist of toolchain directories, and executables with unsafe
+/// permissions. Canonicalisation is only used to reduce symlink and traversal
+/// risks; the build immediately hands off to Cargo after validation to avoid
+/// extending the TOCTOU window.
+pub(crate) fn rustc_path_is_safe(rustc: &str) -> bool {
+    if !validate_basic_path_constraints(rustc) {
         return false;
     }
 
@@ -209,20 +229,16 @@ pub(crate) fn rustc_path_is_safe(rustc: &str) -> bool {
         return is_allowed_compiler_name(rustc);
     }
 
-    if !path.exists() {
-        return false;
-    }
-
     let (inspected_path, metadata) = match fs::canonicalize(path) {
-        Ok(canonical) => match metadata_for(&canonical) {
-            Some(meta) => (canonical, meta),
-            None => return false,
+        Ok(canonical) => match fs::metadata(&canonical) {
+            Ok(meta) => (canonical, meta),
+            Err(_) => return false,
         },
         Err(_) if is_absolute_windows || is_unc => {
             let fallback = PathBuf::from(rustc);
-            match metadata_for(&fallback).or_else(|| metadata_for(path)) {
-                Some(meta) => (fallback, meta),
-                None => return false,
+            match fs::metadata(&fallback).or_else(|_| fs::metadata(path)) {
+                Ok(meta) => (fallback, meta),
+                Err(_) => return false,
             }
         },
         Err(_) => return false,
@@ -246,19 +262,38 @@ pub(crate) fn rustc_path_is_safe(rustc: &str) -> bool {
     }
 
     if let Some(parent) = inspected_path.parent() {
-        let parent_lower = parent.to_string_lossy().to_ascii_lowercase();
-        let allowed = parent_lower.starts_with("\\\\")
-            || ALLOWED_PARENT_PREFIXES
-                .iter()
-                .any(|prefix| parent_lower.starts_with(prefix))
-            || parent_lower.contains("/.cargo/bin")
-            || parent_lower.contains("\\.cargo\\bin")
-            || parent_lower.contains("/.rustup/toolchains")
-            || parent_lower.contains("\\.rustup\\toolchains")
-            || parent_lower.contains("program files");
+        let mut allowed = false;
+
+        if let Some(parent_str) = parent.to_str() {
+            if parent_str.starts_with("\\\\") {
+                allowed = true;
+            } else {
+                let parent_lower = parent_str.to_ascii_lowercase();
+                allowed = ALLOWED_PARENT_PREFIXES
+                    .iter()
+                    .any(|prefix| parent_lower.starts_with(prefix))
+                    || parent_lower.contains("/.cargo/bin")
+                    || parent_lower.contains("\\.cargo\\bin")
+                    || parent_lower.contains("/.rustup/toolchains")
+                    || parent_lower.contains("\\.rustup\\toolchains")
+                    || parent_lower.contains("program files");
+            }
+        }
 
         if !allowed {
-            return false;
+            let parent_lower = parent.to_string_lossy().to_ascii_lowercase();
+            if !(parent_lower.starts_with("\\\\")
+                || ALLOWED_PARENT_PREFIXES
+                    .iter()
+                    .any(|prefix| parent_lower.starts_with(prefix))
+                || parent_lower.contains("/.cargo/bin")
+                || parent_lower.contains("\\.cargo\\bin")
+                || parent_lower.contains("/.rustup/toolchains")
+                || parent_lower.contains("\\.rustup\\toolchains")
+                || parent_lower.contains("program files"))
+            {
+                return false;
+            }
         }
     }
 
@@ -335,11 +370,33 @@ mod tests {
     use helpers::{TempDirGuard, create_tool, unique_temp_dir};
 
     #[test]
+    fn validate_basic_path_constraints_rejects_invalid_paths() {
+        assert!(!validate_basic_path_constraints(""));
+        assert!(!validate_basic_path_constraints(
+            &"a".repeat(RUSTC_PATH_LENGTH_LIMIT + 1)
+        ));
+        assert!(!validate_basic_path_constraints("../rustc"));
+        assert!(!validate_basic_path_constraints("-Zunstable-options"));
+    }
+
+    #[test]
     fn rejects_shell_metacharacters() {
         for ch in constants::FORBIDDEN_SHELL_CHARS {
             let candidate = format!("rustc{ch}");
             assert!(!rustc_path_is_safe(&candidate));
         }
+    }
+
+    #[test]
+    fn test_validates_metadata_atomically() {
+        let base = unique_temp_dir("mw_metadata_atomic");
+        let guard = TempDirGuard(base.clone());
+        let dir_path = base.join(".cargo/bin/rustc");
+        fs::create_dir_all(&dir_path).expect("failed to create test directory");
+
+        let dir_str = dir_path.to_str().expect("path not utf-8").to_string();
+        assert!(!rustc_path_is_safe(&dir_str));
+        drop(guard);
     }
 
     #[test]
@@ -463,6 +520,46 @@ mod tests {
         ) {
             let candidate = format!("%{high}{low}");
             prop_assert!(contains_forbidden_percent_encoding_public(&candidate));
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn rejects_all_forbidden_encoded_chars(
+            prefix in "[a-zA-Z0-9_-]{0,10}",
+            forbidden_char in prop::sample::select(vec![b'.', b'/', b'\\', b' ', b'\t', b'\n', b'\r']),
+            suffix in "[a-zA-Z0-9_-]{0,10}"
+        ) {
+            let encoded = format!("{prefix}%{:02X}{suffix}", forbidden_char);
+            prop_assert!(contains_forbidden_percent_encoding_public(&encoded));
+
+            let encoded_lower = format!("{prefix}%{:02x}{suffix}", forbidden_char);
+            prop_assert!(contains_forbidden_percent_encoding_public(&encoded_lower));
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn handles_malformed_sequences_consistently(
+            base in "[a-zA-Z0-9/]{1,20}",
+            malformed in prop::sample::select(vec!["%", "%G", "%2G", "%GG", "%%"])
+        ) {
+            let candidate = format!("{base}{malformed}");
+            prop_assert!(contains_forbidden_percent_encoding_public(&candidate));
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn path_length_boundary_validation(
+            base_len in 1..=(RUSTC_PATH_LENGTH_LIMIT - 10),
+            extra_chars in 1..=20usize
+        ) {
+            let short_path = "a".repeat(base_len);
+            prop_assert!(validate_basic_path_constraints(&short_path));
+
+            let long_path = "a".repeat(RUSTC_PATH_LENGTH_LIMIT + extra_chars);
+            prop_assert!(!validate_basic_path_constraints(&long_path));
         }
     }
 

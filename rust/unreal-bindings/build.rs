@@ -67,21 +67,30 @@ const HEADER_PREAMBLE_TEMPLATE: &str = r#"/*
 
 /// Represents a `rustc` path that has passed the hardened security validation.
 #[derive(Clone, Debug)]
-pub struct SafeRustcPath(PathBuf);
+pub struct SafeRustcPath {
+    path: PathBuf,
+    _validated: (),
+}
 
 impl SafeRustcPath {
     /// Validate a `rustc` path and wrap it in [`SafeRustcPath`] when the input
     /// satisfies all security checks.
     pub fn validate(candidate: &str) -> Option<Self> {
         if security::rustc_path_is_safe(candidate) {
-            Some(Self(PathBuf::from(candidate)))
+            Some(Self {
+                path: PathBuf::from(candidate),
+                _validated: (),
+            })
         } else {
             None
         }
     }
 
     /// Borrow the underlying path as a [`Path`].
-    pub fn as_path(&self) -> &Path { &self.0 }
+    pub fn as_path(&self) -> &Path { &self.path }
+
+    /// Borrow the validated path as a string slice when it is valid UTF-8.
+    pub fn as_str(&self) -> Option<&str> { self.path.to_str() }
 }
 
 impl AsRef<Path> for SafeRustcPath {
@@ -89,7 +98,7 @@ impl AsRef<Path> for SafeRustcPath {
 }
 
 impl From<SafeRustcPath> for PathBuf {
-    fn from(value: SafeRustcPath) -> Self { value.0 }
+    fn from(value: SafeRustcPath) -> Self { value.path }
 }
 
 fn get_header_filename() -> String {
@@ -411,7 +420,19 @@ mod tests {
             let tool_str = tool.to_str().expect("path not UTF-8");
             let validated = SafeRustcPath::validate(tool_str).expect("expected validation success");
             assert_eq!(validated.as_path(), Path::new(tool_str));
+            assert_eq!(validated.as_str(), Some(tool_str));
             drop(guard);
+        }
+
+        #[test]
+        fn safe_rustc_path_prevents_invalid_construction() {
+            assert!(SafeRustcPath::validate("rustc").is_some());
+            assert!(SafeRustcPath::validate("../evil").is_none());
+
+            let validated = SafeRustcPath::validate("rustc").expect("expected safe rustc");
+            let path_buf: PathBuf = validated.clone().into();
+            assert_eq!(path_buf, PathBuf::from("rustc"));
+            assert!(validated.as_str().is_some());
         }
     }
 
