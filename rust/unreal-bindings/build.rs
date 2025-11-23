@@ -9,6 +9,7 @@ use std::{
 use cbindgen::{Builder, Config, DocumentationLength, Language};
 
 const HEADER_FILENAME: &str = "majestic_world_ffi.h";
+const RUSTC_PATH_LENGTH_LIMIT: usize = 4_096;
 const HEADER_PREAMBLE_TEMPLATE: &str = r#"/*
  * Majestic World FFI (auto-generated).
  *
@@ -62,7 +63,43 @@ const HEADER_PREAMBLE_TEMPLATE: &str = r#"/*
  *         }
  *         return exit_code;
  *     }
- */"#;
+*/"#;
+
+/// Represents a `rustc` path that has passed the hardened security validation.
+#[derive(Clone, Debug)]
+pub struct SafeRustcPath {
+    path: PathBuf,
+    _validated: (),
+}
+
+impl SafeRustcPath {
+    /// Validate a `rustc` path and wrap it in [`SafeRustcPath`] when the input
+    /// satisfies all security checks.
+    pub fn validate(candidate: &str) -> Option<Self> {
+        if security::rustc_path_is_safe(candidate) {
+            Some(Self {
+                path: PathBuf::from(candidate),
+                _validated: (),
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Borrow the underlying path as a [`Path`].
+    pub fn as_path(&self) -> &Path { &self.path }
+
+    /// Borrow the validated path as a string slice when it is valid UTF-8.
+    pub fn as_str(&self) -> Option<&str> { self.path.to_str() }
+}
+
+impl AsRef<Path> for SafeRustcPath {
+    fn as_ref(&self) -> &Path { self.as_path() }
+}
+
+impl From<SafeRustcPath> for PathBuf {
+    fn from(value: SafeRustcPath) -> Self { value.path }
+}
 
 fn get_header_filename() -> String {
     const ENV_KEY: &str = "MW_FFI_HEADER_NAME";
@@ -93,94 +130,12 @@ fn get_header_filename() -> String {
     }
 }
 
-// NOTE: We purposefully keep `rustc_path_is_safe` focused on rejecting
-// obviously malicious *path strings* instead of interrogating filesystem
-// metadata. Per Rust security guidance (e.g., CVE-2022-21658), performing a
-// separate `stat`/`symlink_metadata` check prior to execution introduces a
-// time-of-check/time-of-use race where an attacker can swap the executable
-// between validation and use. Cargo will attempt to execute the compiler
-// immediately after this function, so we only filter clearly dangerous
-// characters and traversal attempts here and let the `rustc` invocation surface
-// any filesystem failures.
-fn rustc_path_is_safe(rustc: &str) -> bool {
-    if rustc.is_empty() || rustc.len() >= 4_096 {
-        return false;
-    }
-
-    // Reject shell metacharacters while allowing Windows path separators.
-    if rustc.chars().any(|ch| {
-        matches!(
-            ch,
-            ';' | '&'
-                | '|'
-                | '`'
-                | '$'
-                | '>'
-                | '<'
-                | '\n'
-                | '\r'
-                | '\0'
-                | '\t'
-                | '"'
-                | '\''
-                | '*'
-                | '?'
-                | '['
-                | ']'
-                | '{'
-                | '}'
-                | '('
-                | ')'
-                | '~'
-                | '#'
-                | '!'
-                | '%'
-                | '^'
-                | ' '
-        )
-    }) {
-        return false;
-    }
-
-    let lower = rustc.to_ascii_lowercase();
-    if rustc.contains("..") || lower.contains("%2e%2e") || lower.contains("%20") {
-        return false;
-    }
-
-    if rustc.starts_with('-') {
-        return false;
-    }
-
-    let is_simple = !rustc.contains('/') && !rustc.contains('\\');
-    let bytes = rustc.as_bytes();
-    let is_absolute_unix = rustc.starts_with('/');
-    let is_absolute_windows = bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && matches!(bytes[2], b'/' | b'\\');
-    let is_unc = if bytes.len() >= 5 && bytes[0] == b'\\' && bytes[1] == b'\\' {
-        let third = bytes[2];
-        third != b'\\' && third != b'/' && bytes[2..].contains(&b'\\')
-    } else {
-        false
-    };
-
-    if !(is_simple || is_absolute_unix || is_absolute_windows || is_unc) {
-        return false;
-    }
-
-    if is_simple && rustc.contains(':') {
-        return false;
-    }
-
-    true
-}
+#[path = "src/security.rs"] mod security;
 
 fn main() {
     let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
-    if !rustc_path_is_safe(&rustc) {
-        panic!("refusing to execute rustc with potentially malicious path: {rustc}");
-    }
+    let _validated_rustc = SafeRustcPath::validate(&rustc)
+        .expect("refusing to execute rustc with potentially malicious path");
 
     if let Err(err) = generate_header() {
         panic!("failed to generate C header: {err}");
@@ -190,7 +145,10 @@ fn main() {
 fn build_config(header_preamble: &str) -> Config {
     Config {
         language: Language::C,
+        // Prefer `#pragma once` to avoid guard name collisions across generated
+        // headers while keeping include protection consistent across toolchains.
         pragma_once: true,
+        include_guard: None,
         cpp_compat: true,
         include_version: true,
         autogen_warning: Some(
@@ -204,11 +162,54 @@ fn build_config(header_preamble: &str) -> Config {
     }
 }
 
+/// Emit fine-grained Cargo rebuild directives for the crate and its sources.
+fn emit_rerun_directives(crate_dir: &Path) -> Result<(), Box<dyn Error>> {
+    let build_script = crate_dir.join("build.rs");
+    println!("cargo:rerun-if-changed={}", build_script.display());
+
+    let manifest = crate_dir.join("Cargo.toml");
+    println!("cargo:rerun-if-changed={}", manifest.display());
+
+    emit_rerun_for_sources(&crate_dir.join("src"))?;
+
+    Ok(())
+}
+
+/// Recursively register all Rust source files under `src_dir` for rebuilds.
+fn emit_rerun_for_sources(src_dir: &Path) -> Result<(), Box<dyn Error>> {
+    if !src_dir.exists() {
+        return Ok(());
+    }
+
+    fn visit(dir: &Path) -> Result<(), Box<dyn Error>> {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if entry.file_type()?.is_dir() {
+                visit(&path)?;
+            } else if path.extension().map_or(false, |ext| ext == "rs") {
+                println!("cargo:rerun-if-changed={}", path.display());
+            }
+        }
+
+        Ok(())
+    }
+
+    visit(src_dir)?;
+
+    Ok(())
+}
+
+/// Generate the C header via cbindgen, mirroring it into the repository if
+/// possible.
+///
+/// The function ensures cargo rebuild directives are accurate, validates the
+/// generated output is non-empty, and surfaces actionable errors when the
+/// generation pipeline fails at any step.
 fn generate_header() -> Result<(), Box<dyn Error>> {
     let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
-    println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=src/lib.rs");
-    println!("cargo:rerun-if-changed=Cargo.toml");
+    emit_rerun_directives(&crate_dir)?;
 
     let cbindgen_toml = crate_dir.join("cbindgen.toml");
     if cbindgen_toml.exists() {
@@ -237,19 +238,41 @@ fn generate_header() -> Result<(), Box<dyn Error>> {
     let bindings = Builder::new()
         .with_config(config)
         .with_crate(&crate_dir)
-        .generate()?;
+        .generate()
+        .map_err(|err| -> Box<dyn Error> {
+            Box::new(IoError::new(
+                ErrorKind::Other,
+                format!(
+                    "failed to generate bindings with cbindgen for {}: {err}",
+                    crate_dir.display()
+                ),
+            ))
+        })?;
 
     let mut new_file_bytes = Vec::new();
     bindings.write(&mut new_file_bytes);
+
     if new_file_bytes.is_empty() {
         return Err(IoError::new(
-            ErrorKind::Other,
-            "cbindgen produced an empty header; ensure FFI exports are marked #[no_mangle] and \
-             declared extern \"C\"",
+            ErrorKind::InvalidData,
+            format!(
+                "cbindgen produced an empty header for {header_filename}; ensure FFI exports are \
+                 marked #[no_mangle] and declared extern \"C\"",
+            ),
         )
         .into());
     }
     let new_contents = String::from_utf8(new_file_bytes)?;
+    if new_contents.trim().is_empty() {
+        return Err(IoError::new(
+            ErrorKind::InvalidData,
+            format!(
+                "cbindgen produced a whitespace-only header for {header_filename}; ensure \
+                 exported symbols are declared extern \"C\"",
+            ),
+        )
+        .into());
+    }
 
     write_if_changed(&out_header_path, &new_contents)?;
 
@@ -269,12 +292,24 @@ fn generate_header() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Persist `contents` to `path` when the data differs, creating parent
+/// directories as required.
+///
+/// The function avoids unnecessary writes for unchanged files and provides
+/// contextual I/O errors when filesystem operations fail.
 fn write_if_changed(path: &Path, contents: &str) -> Result<(), Box<dyn Error>> {
     let needs_write = match fs::read_to_string(path) {
         Ok(existing) => existing != contents,
-        Err(err) => match err.kind() {
-            ErrorKind::NotFound => true,
-            _ => return Err(err.into()),
+        Err(err) => {
+            if err.kind() == ErrorKind::NotFound {
+                true
+            } else {
+                return Err(IoError::new(
+                    err.kind(),
+                    format!("failed to read existing file {}: {err}", path.display()),
+                )
+                .into());
+            }
         },
     };
 
@@ -282,28 +317,41 @@ fn write_if_changed(path: &Path, contents: &str) -> Result<(), Box<dyn Error>> {
         if let Some(parent) = path.parent() {
             ensure_directory(parent)?;
         }
-        fs::write(path, contents)?;
+        fs::write(path, contents).map_err(|err| {
+            IoError::new(
+                err.kind(),
+                format!("failed to write {}: {err}", path.display()),
+            )
+        })?;
     }
 
     Ok(())
 }
 
+/// Ensure `path` exists as a directory, creating it (and parents) as needed.
 fn ensure_directory(path: &Path) -> Result<(), Box<dyn Error>> {
     if path.exists() {
         if !path.is_dir() {
             return Err(IoError::new(
-                ErrorKind::Other,
+                ErrorKind::InvalidInput,
                 format!("Path exists but is not a directory: {}", path.display()),
             )
             .into());
         }
     } else {
-        fs::create_dir_all(path)?;
+        fs::create_dir_all(path).map_err(|err| {
+            IoError::new(
+                err.kind(),
+                format!("failed to create directory {}: {err}", path.display()),
+            )
+        })?;
     }
 
     Ok(())
 }
 
+/// Attempt to mirror the generated header into the repository include
+/// directory.
 fn try_write_repository_header(
     include_dir: &Path,
     file_name: &str,
@@ -319,201 +367,153 @@ fn try_write_repository_header(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        HEADER_FILENAME, build_config, get_header_filename, rustc_path_is_safe, write_if_changed,
-    };
-    use std::{
-        env, fs,
-        io::{Error as IoError, ErrorKind},
-        path::PathBuf,
-    };
+    use super::*;
+    use std::path::{Path, PathBuf};
 
-    struct TempDirGuard(PathBuf);
+    mod fixtures {
+        use super::*;
+        use std::time::{SystemTime, UNIX_EPOCH};
 
-    impl Drop for TempDirGuard {
-        fn drop(&mut self) {
-            let path = &self.0;
-            if let Err(err) = fs::remove_dir_all(path) {
-                eprintln!(
-                    "warning: failed to clean temporary directory {}: {err}",
-                    path.display()
-                );
+        pub(super) struct TempDirGuard(pub(super) PathBuf);
+
+        impl Drop for TempDirGuard {
+            fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+        }
+
+        pub(super) fn unique_temp_dir(prefix: &str) -> PathBuf {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            env::temp_dir().join(format!("{prefix}_{:x}_{:x}", std::process::id(), timestamp))
+        }
+
+        pub(super) fn create_tool(path: &Path, contents: &[u8]) {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("failed to create parent directory");
+            }
+            fs::write(path, contents).expect("failed to create tool contents");
+        }
+    }
+
+    mod safe_rustc_path {
+        use super::*;
+        use fixtures::{TempDirGuard, create_tool, unique_temp_dir};
+
+        #[test]
+        fn validate_rejects_untrusted_paths() {
+            assert!(SafeRustcPath::validate("../rustc").is_none());
+            assert!(SafeRustcPath::validate("rustc malicious").is_none());
+        }
+
+        #[test]
+        fn validate_wraps_safe_paths() {
+            let root = unique_temp_dir("mw_safe_rustc");
+            let guard = TempDirGuard(root.clone());
+            let tool = root.join(".cargo/bin/rustc");
+            create_tool(&tool, b"#!/bin/true\n");
+
+            let tool_str = tool.to_str().expect("path not UTF-8");
+            let validated = SafeRustcPath::validate(tool_str).expect("expected validation success");
+            assert_eq!(validated.as_path(), Path::new(tool_str));
+            assert_eq!(validated.as_str(), Some(tool_str));
+            drop(guard);
+        }
+
+        #[test]
+        fn safe_rustc_path_prevents_invalid_construction() {
+            assert!(SafeRustcPath::validate("rustc").is_some());
+            assert!(SafeRustcPath::validate("../evil").is_none());
+
+            let validated = SafeRustcPath::validate("rustc").expect("expected safe rustc");
+            let path_buf: PathBuf = validated.clone().into();
+            assert_eq!(path_buf, PathBuf::from("rustc"));
+            assert!(validated.as_str().is_some());
+        }
+    }
+
+    mod header_configuration {
+        use super::*;
+
+        #[test]
+        fn config_uses_pragma_once_without_include_guard() {
+            let config = build_config("test");
+            assert!(config.pragma_once);
+            assert!(config.include_guard.is_none());
+        }
+
+        #[test]
+        fn cbindgen_config_triggers_rebuild_if_present() {
+            let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let cbindgen_toml = crate_dir.join("cbindgen.toml");
+            if cbindgen_toml.exists() {
+                assert!(cbindgen_toml.is_file());
+            }
+        }
+
+        #[test]
+        fn header_filename_respects_env_var() {
+            const KEY: &str = "MW_FFI_HEADER_NAME";
+            let original = env::var(KEY).ok();
+
+            env::remove_var(KEY);
+            assert_eq!(get_header_filename(), HEADER_FILENAME);
+
+            env::set_var(KEY, "custom_ffi.h");
+            assert_eq!(get_header_filename(), "custom_ffi.h");
+
+            match original {
+                Some(value) => env::set_var(KEY, value),
+                None => env::remove_var(KEY),
+            }
+        }
+
+        #[test]
+        fn header_filename_validates_format() {
+            const KEY: &str = "MW_FFI_HEADER_NAME";
+            let original = env::var(KEY).ok();
+
+            env::set_var(KEY, "invalid_name");
+            assert_eq!(get_header_filename(), HEADER_FILENAME);
+
+            env::set_var(KEY, "../evil.h");
+            assert_eq!(get_header_filename(), HEADER_FILENAME);
+
+            env::set_var(KEY, "custom.h");
+            assert_eq!(get_header_filename(), "custom.h");
+
+            match original {
+                Some(value) => env::set_var(KEY, value),
+                None => env::remove_var(KEY),
             }
         }
     }
 
-    #[test]
-    fn accepts_normal_rustc_paths() {
-        assert!(rustc_path_is_safe("/usr/bin/rustc"));
+    mod file_operations {
+        use super::*;
+        use fixtures::{TempDirGuard, unique_temp_dir};
 
-        #[cfg(windows)]
-        {
-            assert!(rustc_path_is_safe("C:/Rust/bin/rustc.exe"));
-            assert!(rustc_path_is_safe("C:\\Rust\\bin\\rustc.exe"));
+        #[test]
+        fn write_if_changed_propagates_permission_errors() {
+            let temp_dir = unique_temp_dir("mw_build_write_permission_test");
+            let _ = fs::remove_dir_all(&temp_dir);
+            fs::create_dir_all(&temp_dir).expect("failed to create temp dir");
+            let _guard = TempDirGuard(temp_dir.clone());
+
+            let blocking_path = temp_dir.join("not_a_directory");
+            fs::write(&blocking_path, "marker").expect("failed to create blocking file");
+
+            let child_path = blocking_path.join("child.txt");
+            let err = write_if_changed(&child_path, "changed").expect_err("write should fail");
+            let io_err = err
+                .downcast::<IoError>()
+                .expect("expected io::Error from write failure");
+            assert_eq!(io_err.kind(), ErrorKind::InvalidInput);
+            assert!(
+                io_err
+                    .to_string()
+                    .contains(&blocking_path.display().to_string())
+            );
         }
-    }
-
-    #[test]
-    fn rejects_paths_with_shell_metacharacters() {
-        assert!(!rustc_path_is_safe("/usr/bin/rustc;rm -rf /"));
-        assert!(!rustc_path_is_safe("rustc|malicious"));
-    }
-
-    #[test]
-    fn allows_known_wrappers() {
-        assert!(rustc_path_is_safe("/usr/bin/sccache"));
-        assert!(rustc_path_is_safe("/usr/local/bin/rustc-wrapper"));
-    }
-
-    #[test]
-    fn rejects_additional_dangerous_characters() {
-        assert!(!rustc_path_is_safe("rustc\0malicious"));
-        assert!(!rustc_path_is_safe("rustc\"evil"));
-        assert!(!rustc_path_is_safe("rustc'bad'"));
-        assert!(!rustc_path_is_safe("rustc\\inject"));
-        assert!(!rustc_path_is_safe("rustc*glob"));
-        assert!(!rustc_path_is_safe("rustc?wildcard"));
-        assert!(!rustc_path_is_safe("rustc[range]"));
-        assert!(!rustc_path_is_safe("rustc{expansion}"));
-        assert!(!rustc_path_is_safe("rustc(subshell)"));
-        assert!(!rustc_path_is_safe("rustc~home"));
-        assert!(!rustc_path_is_safe("rustc#fragment"));
-        assert!(!rustc_path_is_safe("rustc!history"));
-        assert!(!rustc_path_is_safe("rustc%env"));
-        assert!(!rustc_path_is_safe("rustc^caret"));
-    }
-
-    #[test]
-    fn rejects_path_traversal_attempts() {
-        assert!(!rustc_path_is_safe("/usr/bin/../../../bin/sh"));
-        assert!(!rustc_path_is_safe("../rustc"));
-        assert!(!rustc_path_is_safe("rustc/../evil"));
-    }
-
-    #[test]
-    fn rejects_url_encoded_path_traversal() {
-        assert!(!rustc_path_is_safe("/usr/bin/%2e%2e/sh"));
-        assert!(!rustc_path_is_safe("%2E%2E/rustc"));
-        assert!(!rustc_path_is_safe("rustc/%2e%2E/evil"));
-    }
-
-    #[test]
-    fn distinguishes_absolute_simple_and_relative_paths() {
-        assert!(rustc_path_is_safe("rustc"));
-        assert!(rustc_path_is_safe("/usr/bin/rustc"));
-        #[cfg(windows)]
-        {
-            assert!(rustc_path_is_safe("C:/Rust/bin/rustc.exe"));
-            assert!(rustc_path_is_safe("C:\\Rust\\bin\\rustc.exe"));
-        }
-        assert!(!rustc_path_is_safe("bin/rustc"));
-        assert!(!rustc_path_is_safe(".\\rustc.exe"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn accepts_windows_backslash_paths() {
-        assert!(rustc_path_is_safe("C:\\Rust\\bin\\rustc.exe"));
-        assert!(rustc_path_is_safe("\\\\server\\share\\rustc.exe"));
-    }
-
-    #[test]
-    fn rejects_space_characters_and_url_encoded_spaces() {
-        assert!(!rustc_path_is_safe("rustc malicious"));
-        assert!(!rustc_path_is_safe("/usr/bin/rustc evil"));
-        assert!(!rustc_path_is_safe("rustc%20inject"));
-        assert!(!rustc_path_is_safe("%20rustc"));
-        assert!(!rustc_path_is_safe("rustc%20%20evil"));
-    }
-
-    #[test]
-    fn rejects_flag_injection() {
-        assert!(!rustc_path_is_safe("-Zprint-link-args"));
-        assert!(!rustc_path_is_safe("--help"));
-    }
-
-    #[test]
-    fn rejects_oversized_paths() {
-        let oversized = "a".repeat(4_097);
-        assert!(!rustc_path_is_safe(&oversized));
-    }
-
-    #[test]
-    fn config_uses_pragma_once_without_include_guard() {
-        let config = build_config("test");
-        assert!(config.pragma_once);
-        assert!(config.include_guard.is_none());
-    }
-
-    #[test]
-    fn cbindgen_config_triggers_rebuild_if_present() {
-        let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let cbindgen_toml = crate_dir.join("cbindgen.toml");
-        if cbindgen_toml.exists() {
-            assert!(cbindgen_toml.is_file());
-        }
-    }
-
-    #[test]
-    fn header_filename_respects_env_var() {
-        const KEY: &str = "MW_FFI_HEADER_NAME";
-        let original = env::var(KEY).ok();
-
-        env::remove_var(KEY);
-        assert_eq!(get_header_filename(), HEADER_FILENAME);
-
-        env::set_var(KEY, "custom_ffi.h");
-        assert_eq!(get_header_filename(), "custom_ffi.h");
-
-        match original {
-            Some(value) => env::set_var(KEY, value),
-            None => env::remove_var(KEY),
-        }
-    }
-
-    #[test]
-    fn header_filename_validates_format() {
-        const KEY: &str = "MW_FFI_HEADER_NAME";
-        let original = env::var(KEY).ok();
-
-        env::set_var(KEY, "invalid_name");
-        assert_eq!(get_header_filename(), HEADER_FILENAME);
-
-        env::set_var(KEY, "../evil.h");
-        assert_eq!(get_header_filename(), HEADER_FILENAME);
-
-        env::set_var(KEY, "custom.h");
-        assert_eq!(get_header_filename(), "custom.h");
-
-        match original {
-            Some(value) => env::set_var(KEY, value),
-            None => env::remove_var(KEY),
-        }
-    }
-
-    #[test]
-    fn write_if_changed_propagates_permission_errors() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "mw_build_write_permission_test_{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&temp_dir);
-        fs::create_dir_all(&temp_dir).expect("failed to create temp dir");
-        let _guard = TempDirGuard(temp_dir.clone());
-
-        let blocking_path = temp_dir.join("not_a_directory");
-        fs::write(&blocking_path, "marker").expect("failed to create blocking file");
-
-        let child_path = blocking_path.join("child.txt");
-        let err = write_if_changed(&child_path, "changed").expect_err("write should fail");
-        let io_err = err
-            .downcast::<IoError>()
-            .expect("expected io::Error from write failure");
-        assert_eq!(io_err.kind(), ErrorKind::Other);
-    }
-
-    #[test]
-    fn rejects_suspicious_canonical_paths() {
-        assert!(!rustc_path_is_safe("/tmp/../../../bin/sh"));
     }
 }
