@@ -134,9 +134,8 @@ fn get_header_filename() -> String {
 
 fn main() {
     let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
-    let _validated_rustc = SafeRustcPath::validate(&rustc).unwrap_or_else(|| {
-        panic!("refusing to execute rustc with potentially malicious path: {rustc}");
-    });
+    let _validated_rustc = SafeRustcPath::validate(&rustc)
+        .expect("refusing to execute rustc with potentially malicious path");
 
     if let Err(err) = generate_header() {
         panic!("failed to generate C header: {err}");
@@ -182,25 +181,22 @@ fn emit_rerun_for_sources(src_dir: &Path) -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let mut stack = vec![src_dir.to_path_buf()];
-    let mut files = Vec::new();
-
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir)? {
+    fn visit(dir: &Path) -> Result<(), Box<dyn Error>> {
+        for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
+
             if entry.file_type()?.is_dir() {
-                stack.push(path);
+                visit(&path)?;
             } else if path.extension().map_or(false, |ext| ext == "rs") {
-                files.push(path);
+                println!("cargo:rerun-if-changed={}", path.display());
             }
         }
+
+        Ok(())
     }
 
-    files.sort();
-    for file in files {
-        println!("cargo:rerun-if-changed={}", file.display());
-    }
+    visit(src_dir)?;
 
     Ok(())
 }

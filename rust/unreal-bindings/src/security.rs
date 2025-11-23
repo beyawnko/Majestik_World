@@ -39,9 +39,6 @@ const ALLOWED_PARENT_PREFIXES: &[&str] = &[
     "c:/rust",
     "c:/program files",
     "c:/users",
-    "c\\rust",
-    "c\\program files",
-    "c\\users",
 ];
 
 #[cfg(unix)]
@@ -103,7 +100,7 @@ fn has_suspicious_component(path: &Path) -> bool {
                     return true;
                 }
 
-                if lower == "" || lower == "~" {
+                if lower == "~" {
                     return true;
                 }
             },
@@ -236,7 +233,7 @@ pub(crate) fn rustc_path_is_safe(rustc: &str) -> bool {
         },
         Err(_) if is_absolute_windows || is_unc => {
             let fallback = PathBuf::from(rustc);
-            match fs::metadata(&fallback).or_else(|_| fs::metadata(path)) {
+            match fs::metadata(&fallback) {
                 Ok(meta) => (fallback, meta),
                 Err(_) => return false,
             }
@@ -262,38 +259,19 @@ pub(crate) fn rustc_path_is_safe(rustc: &str) -> bool {
     }
 
     if let Some(parent) = inspected_path.parent() {
-        let mut allowed = false;
+        let parent_lower = parent.to_string_lossy().to_ascii_lowercase();
+        let normalized = parent_lower.replace('\\', "/");
 
-        if let Some(parent_str) = parent.to_str() {
-            if parent_str.starts_with("\\\\") {
-                allowed = true;
-            } else {
-                let parent_lower = parent_str.to_ascii_lowercase();
-                allowed = ALLOWED_PARENT_PREFIXES
-                    .iter()
-                    .any(|prefix| parent_lower.starts_with(prefix))
-                    || parent_lower.contains("/.cargo/bin")
-                    || parent_lower.contains("\\.cargo\\bin")
-                    || parent_lower.contains("/.rustup/toolchains")
-                    || parent_lower.contains("\\.rustup\\toolchains")
-                    || parent_lower.contains("program files");
-            }
-        }
+        let allowed = parent_lower.starts_with("\\\\")
+            || ALLOWED_PARENT_PREFIXES
+                .iter()
+                .any(|prefix| normalized.starts_with(prefix))
+            || normalized.contains("/.cargo/bin")
+            || normalized.contains("/.rustup/toolchains")
+            || parent_lower.contains("program files");
 
         if !allowed {
-            let parent_lower = parent.to_string_lossy().to_ascii_lowercase();
-            if !(parent_lower.starts_with("\\\\")
-                || ALLOWED_PARENT_PREFIXES
-                    .iter()
-                    .any(|prefix| parent_lower.starts_with(prefix))
-                || parent_lower.contains("/.cargo/bin")
-                || parent_lower.contains("\\.cargo\\bin")
-                || parent_lower.contains("/.rustup/toolchains")
-                || parent_lower.contains("\\.rustup\\toolchains")
-                || parent_lower.contains("program files"))
-            {
-                return false;
-            }
+            return false;
         }
     }
 
@@ -405,6 +383,8 @@ mod tests {
         assert!(!rustc_path_is_safe("../rustc"));
         assert!(!rustc_path_is_safe("rustc/../bin"));
         assert!(!rustc_path_is_safe("/usr/bin/.hidden/rustc"));
+        assert!(!rustc_path_is_safe("c:/rust/../evil"));
+        assert!(!rustc_path_is_safe("c\\rust\\..\\evil"));
     }
 
     #[test]
@@ -501,11 +481,12 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let temp_dir = unique_temp_dir("mw_build_symlink_test");
+        let cargo_bin = temp_dir.join(".cargo/bin");
         let _guard = TempDirGuard(temp_dir.clone());
 
-        let target = temp_dir.join("not_rustc");
+        let target = cargo_bin.join("not_rustc");
         create_tool(&target, b"echo not rustc\n");
-        let link_path = temp_dir.join("rustc");
+        let link_path = cargo_bin.join("rustc");
         symlink(&target, &link_path).expect("failed to create symlink");
 
         let link_str = link_path.to_str().unwrap().to_string();
@@ -573,7 +554,14 @@ mod tests {
             if let Ok(decoded) = u8::from_str_radix(&pair, 16) {
                 prop_assume!(!matches!(decoded, b'.' | b'/' | b'\\' | b' ' | b'\t' | b'\n' | b'\r'));
 
-                let candidate = format!("/usr/local/bin/rustc%{pair}");
+                let base = unique_temp_dir("mw_prop_percent");
+                let cargo_bin = base.join(".cargo/bin");
+                let _guard = TempDirGuard(base.clone());
+
+                let candidate_path = cargo_bin.join(format!("rustc%{pair}"));
+                create_tool(&candidate_path, b"#!/bin/true\n");
+
+                let candidate = candidate_path.to_str().unwrap().to_string();
                 prop_assert!(rustc_path_is_safe(&candidate));
             }
         }
